@@ -30,10 +30,50 @@ class SystemService:
             "control panel": "control.exe",
             "whatsapp": "start whatsapp:",
         }
+        self._known_sites = {
+            "notebooklm": "https://notebooklm.google.com/",
+            "chatgpt": "https://chatgpt.com/",
+            "github": "https://github.com/",
+            "gmail": "https://mail.google.com/",
+            "google docs": "https://docs.google.com/",
+            "google drive": "https://drive.google.com/",
+            "google calendar": "https://calendar.google.com/",
+            "google maps": "https://maps.google.com/",
+            "youtube": "https://www.youtube.com/",
+            "spotify": "https://open.spotify.com/",
+            "notion": "https://www.notion.so/",
+            "stackoverflow": "https://stackoverflow.com/",
+            "whatsapp web": "https://web.whatsapp.com/",
+        }
 
     def open_app(self, app_name: str) -> str:
         target = self._known_apps.get(app_name.lower().strip(), app_name.strip())
         return self._run_command(target, f"Opening {app_name}.")
+
+    def open_target(self, target: str) -> str:
+        normalized = target.lower().strip()
+
+        if normalized in self._known_sites:
+            webbrowser.open(self._known_sites[normalized])
+            return f"Opening {target} in your browser."
+
+        if normalized in self._known_apps:
+            return self.open_app(normalized)
+
+        if normalized.startswith("http://") or normalized.startswith("https://"):
+            webbrowser.open(target)
+            return f"Opening {target}."
+
+        if "." in normalized and " " not in normalized:
+            webbrowser.open(f"https://{normalized}")
+            return f"Opening {normalized}."
+
+        guessed_site = normalized.replace(" ", "")
+        if guessed_site:
+            webbrowser.open(f"https://www.google.com/search?q={guessed_site}")
+            return f"I couldn't match a local app, so I searched the web for {target}."
+
+        return f"I couldn't figure out how to open {target}."
 
     def open_folder(self, path: str) -> str:
         expanded = Path(os.path.expandvars(path)).expanduser()
@@ -44,6 +84,9 @@ class SystemService:
 
     def search_files(self, name: str, limit: int = 8) -> list[str]:
         needle = name.lower().strip()
+        quick_matches = self._fast_filename_search(needle, limit)
+        if quick_matches:
+            return quick_matches
         matches: list[str] = []
         for root in self._search_roots:
             if not root.exists():
@@ -57,6 +100,26 @@ class SystemService:
             except OSError:
                 continue
         return matches
+
+    def search_web(self, query: str) -> str:
+        webbrowser.open(f"https://www.google.com/search?q={query.replace(' ', '+')}")
+        return f"Searching the web for {query}."
+
+    def _fast_filename_search(self, needle: str, limit: int) -> list[str]:
+        matches: list[str] = []
+        try:
+            result = subprocess.run(
+                f'where /r "{self._home}" *{needle}*',
+                capture_output=True,
+                text=True,
+                timeout=8,
+                shell=True,
+            )
+            lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+            matches.extend(lines[:limit])
+        except Exception:
+            pass
+        return matches[:limit]
 
     def set_brightness(self, percent: int) -> str:
         percent = max(10, min(100, percent))

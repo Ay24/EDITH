@@ -12,9 +12,11 @@ from edith_app.services.agent_service import AgentService
 from edith_app.services.audio_service import AudioService
 from edith_app.services.knowledge_service import KnowledgeService
 from edith_app.services.media_service import MediaService
+from edith_app.services.memory_service import MemoryService
 from edith_app.services.notes_service import NotesService
 from edith_app.services.system_service import SystemService
 from edith_app.services.voice_service import VoiceService
+from edith_app.services.whatsapp_service import WhatsAppService
 
 try:
     import phonenumbers
@@ -34,8 +36,13 @@ class EdithAssistant:
             lightweight_mode=config.lightweight_mode,
         )
         self.media = MediaService(config)
+        self.memory = MemoryService(config.memory_path)
         self.notes = NotesService(config.notes_path)
         self.system = SystemService()
+        self.whatsapp = WhatsAppService()
+        self._pending_suggestion: str | None = None
+        self._pending_message_contact: str | None = None
+        self._suggestion_cooldown_turns = 0
 
     def snapshot(self) -> AssistantSnapshot:
         return AssistantSnapshot(
@@ -56,16 +63,49 @@ class EdithAssistant:
     def speak(self, text: str) -> None:
         self.audio.speak(text)
 
+    def stop_speaking(self) -> None:
+        self.audio.stop()
+
     def listen_once(self) -> str:
         return self.voice.listen_once()
 
     def listen_for_command(self) -> str:
         return self.voice.listen_for_command(timeout=self.config.voice_command_timeout)
 
+    def listen_for_interrupt(self) -> str:
+        return self.voice.listen_for_interrupt()
+
     def handle(self, command: str) -> CommandResult:
         command = command.strip()
         lowered = command.lower()
         self._remember("user", command)
+
+        if lowered in {"yes", "yes do it", "do it", "go ahead"} and self._pending_suggestion:
+            replay_command = self._pending_suggestion
+            self._pending_suggestion = None
+            return self.handle(replay_command)
+
+        if lowered in {"no", "nope", "cancel", "not that"} and self._pending_suggestion:
+            self._pending_suggestion = None
+            self._suggestion_cooldown_turns = 2
+            result = CommandResult("Understood. Tell me what you want instead.", action="memory")
+            self._remember("assistant", result.reply)
+            return result
+
+        if self._pending_suggestion and lowered not in {"yes", "yes do it", "do it", "go ahead", "no", "nope", "cancel", "not that"}:
+            self._pending_suggestion = None
+
+        if lowered in {"cancel message", "cancel the message", "never mind"} and self._pending_message_contact:
+            contact = self._pending_message_contact
+            self._pending_message_contact = None
+            result = CommandResult(f"Cancelled the pending message for {contact}.", action="message")
+            self._remember("assistant", result.reply)
+            return result
+
+        if self._pending_message_contact and lowered not in {"yes", "yes do it", "do it", "go ahead", "no", "nope", "cancel", "not that"}:
+            contact = self._pending_message_contact
+            self._pending_message_contact = None
+            return self._finalize_pending_message(contact, command)
 
         if not command:
             result = CommandResult("I need a command to work with.")
@@ -90,6 +130,9 @@ class EdithAssistant:
         elif lowered.startswith("search google for"):
             query = self._strip_words(lowered, ["search google for"])
             result = CommandResult(self._google(query), action="browser")
+        elif lowered.startswith("search the web for") or lowered.startswith("look up ") or lowered.startswith("browse "):
+            query = self._strip_words(lowered, ["search the web for", "look up", "browse"])
+            result = CommandResult(self.system.search_web(query), action="browser")
         elif lowered in {"open google", "google"}:
             result = CommandResult(self._google(""), action="browser")
         elif lowered.startswith("open github"):
@@ -99,12 +142,26 @@ class EdithAssistant:
         elif lowered.startswith("open gmail"):
             result = CommandResult(self.media.open_site("https://mail.google.com/", "Gmail"), action="browser")
         elif lowered.startswith("open whatsapp"):
-            result = CommandResult(self.system.open_website("https://web.whatsapp.com/", "WhatsApp"), action="browser")
+            result = CommandResult(self.whatsapp.open_app(), action="system")
+        elif self._is_whatsapp_send_command(lowered):
+            result = CommandResult(self._send_whatsapp_message(command), action="message")
+        elif self._is_message_contact_only_command(lowered):
+            result = CommandResult(self._start_pending_message(command), action="message")
+        elif lowered in {"read my whatsapp messages", "read my messages", "read whatsapp messages"}:
+            result = CommandResult(self.whatsapp.read_current_chat(), action="message")
         elif lowered.startswith("open folder "):
             target = command[len("open folder "):].strip()
             result = CommandResult(self.system.open_folder(target), action="files")
         elif lowered.startswith("find file ") or lowered.startswith("find folder "):
             query = command.split(" ", 2)[2].strip()
+            result = CommandResult(self._search_files(query), action="files")
+        elif lowered.startswith("find ") and ("on my system" in lowered or "in my system" in lowered):
+            query = (
+                lowered.replace("find", "", 1)
+                .replace("on my system", "")
+                .replace("in my system", "")
+                .strip()
+            )
             result = CommandResult(self._search_files(query), action="files")
         elif lowered.startswith("open calculator"):
             result = CommandResult(self.system.open_app("calculator"), action="system")
@@ -114,9 +171,12 @@ class EdithAssistant:
             result = CommandResult(self.system.open_app("settings"), action="system")
         elif lowered.startswith("open explorer") or lowered.startswith("open files"):
             result = CommandResult(self.system.open_app("explorer"), action="system")
+        elif lowered.startswith("go to ") and len(lowered.split()) >= 2:
+            target = command[len("go to "):].strip()
+            result = CommandResult(self.system.open_target(target), action="browser")
         elif lowered.startswith("open ") and len(lowered.split()) >= 2:
-            app_name = command[len("open "):].strip()
-            result = CommandResult(self.system.open_app(app_name), action="system")
+            target = command[len("open "):].strip()
+            result = CommandResult(self.system.open_target(target), action="system")
         elif lowered in {"time", "what is the time", "the time"}:
             result = CommandResult(f"The time is {datetime.now().strftime('%I:%M %p') }.", action="clock")
         elif lowered in {"date", "what is the date", "today's date", "todays date"}:
@@ -127,11 +187,17 @@ class EdithAssistant:
         elif lowered.startswith("save note") or "take note" in lowered or "note this" in lowered:
             note = self._extract_note(command)
             result = CommandResult(self.notes.save(note), action="note")
-        elif lowered.startswith("increase volume"):
+        elif self._is_volume_up_command(lowered):
             result = CommandResult(self.audio.adjust_volume(0.1), action="audio")
-        elif lowered.startswith("decrease volume"):
+        elif self._is_volume_down_command(lowered):
             result = CommandResult(self.audio.adjust_volume(-0.1), action="audio")
-        elif lowered.startswith("set brightness to "):
+        elif self._is_set_volume_command(lowered):
+            result = CommandResult(self.audio.set_volume(self._extract_number(lowered, default=50)), action="audio")
+        elif lowered in {"mute", "mute volume", "mute audio", "turn off volume"}:
+            result = CommandResult(self.audio.mute(), action="audio")
+        elif lowered in {"unmute", "unmute volume", "unmute audio", "turn on volume"}:
+            result = CommandResult(self.audio.unmute(), action="audio")
+        elif self._is_brightness_command(lowered):
             value = self._extract_number(lowered, default=60)
             result = CommandResult(self.system.set_brightness(value), action="system")
         elif lowered in {"wifi on", "turn wifi on", "enable wifi"}:
@@ -182,12 +248,28 @@ class EdithAssistant:
             topic = command[len("quick answer "):].strip()
             result = CommandResult(self.agent.quick_think(topic, self.history), action="quick")
         else:
+            if self._should_suggest(command):
+                similar = self.memory.similar(command, threshold=0.9)
+                if similar is not None:
+                    self._pending_suggestion = similar.command
+                    result = CommandResult(
+                        f"This sounds similar to when you said '{similar.command}'. "
+                        "Is that what you want to achieve again?",
+                        action="memory",
+                    )
+                    self._remember("assistant", result.reply)
+                    return result
             entities = self.knowledge.extract_entities(command)
             reply = self.agent.reply(command, self.history)
             metadata = {"entities": ", ".join(entities)} if entities else {}
             result = CommandResult(reply=reply, action="agent", metadata=metadata)
 
+        result.reply = self._polish_reply(result.reply, result.action)
         self._remember("assistant", result.reply)
+        if self._should_store(result.action):
+            self.memory.remember(command, result.reply, result.action)
+        if self._suggestion_cooldown_turns > 0:
+            self._suggestion_cooldown_turns -= 1
         return result
 
     def _remember(self, source: str, text: str) -> None:
@@ -198,8 +280,8 @@ class EdithAssistant:
             "I can act as a multi-model local open-source desktop assistant with Ollama, brainstorm ideas, "
             "build plans, think through problems with you, launch YouTube and Spotify automations, open common "
             "Windows tools, search files and folders, control Wi-Fi and brightness, check for updates, start focus "
-            "and research routines, search Google, summarize Wikipedia, save notes, adjust system volume, and listen "
-            "for voice input when audio dependencies are installed."
+            "and research routines, search Google, summarize Wikipedia, save notes, remember past chat intentions, "
+            "adjust system volume, and listen for voice input when audio dependencies are installed."
         )
 
     def _strip_words(self, text: str, words: list[str]) -> str:
@@ -234,6 +316,59 @@ class EdithAssistant:
         formatted = phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
         return f"Contact {name} is ready at {formatted}."
 
+    def _send_whatsapp_message(self, command: str) -> str:
+        contact_pattern = self._contact_name_pattern()
+        match = re.match(
+            rf"(?:send message to|message|text)\s+(.+?)\s+(?:saying|that|telling them)\s+(.+)",
+            command,
+            flags=re.IGNORECASE,
+        )
+        if not match and contact_pattern:
+            match = re.match(
+                rf"({contact_pattern})\s+(?:saying|that|telling them)\s+(.+)",
+                command,
+                flags=re.IGNORECASE,
+            )
+        if not match:
+            return "Say it like: message primary_contact saying I am on the way."
+        name = match.group(1).strip()
+        message = match.group(2).strip()
+        if not name or not message:
+            return "I need both a contact name and a message."
+
+        resolved_name = self._resolve_contact_name(name) or name.strip()
+        if self._looks_incomplete_message(message):
+            self._pending_message_contact = resolved_name
+            return f"I caught {resolved_name}. Continue your message and I'll send it."
+        return self.whatsapp.send_message(resolved_name, message)
+
+    def _start_pending_message(self, command: str) -> str:
+        match = re.match(r"(?:send message to|message|text)\s+(.+)", command, flags=re.IGNORECASE)
+        if not match:
+            return "Tell me who the message is for."
+        name = match.group(1).strip()
+        resolved_name = self._resolve_contact_name(name) or name
+        self._pending_message_contact = resolved_name
+        return f"What should I send to {resolved_name}?"
+
+    def _finalize_pending_message(self, contact: str, message: str) -> CommandResult:
+        cleaned = message.strip()
+        if not cleaned:
+            return CommandResult(f"I didn't catch the message for {contact}.", action="message")
+        reply = self.whatsapp.send_message(contact, cleaned)
+        return CommandResult(reply, action="message")
+
+    def _resolve_contact_name(self, spoken_name: str) -> str | None:
+        lowered = spoken_name.lower().strip()
+        for saved_name in self.config.contacts:
+            if saved_name.lower() == lowered:
+                return saved_name
+        return None
+
+    def _contact_name_pattern(self) -> str:
+        names = sorted(self.config.contacts.keys(), key=len, reverse=True)
+        return "|".join(re.escape(name) for name in names)
+
     def _search_files(self, query: str) -> str:
         matches = self.system.search_files(query)
         if not matches:
@@ -246,6 +381,152 @@ class EdithAssistant:
         if not numbers:
             return default
         return int(numbers[0])
+
+    def _is_volume_up_command(self, text: str) -> bool:
+        phrases = (
+            "increase volume",
+            "turn up the volume",
+            "turn the volume up",
+            "volume up",
+            "raise the volume",
+            "make it louder",
+            "make the sound louder",
+            "boost the volume",
+        )
+        return any(phrase in text for phrase in phrases)
+
+    def _is_volume_down_command(self, text: str) -> bool:
+        phrases = (
+            "decrease volume",
+            "turn down the volume",
+            "turn the volume down",
+            "volume down",
+            "lower the volume",
+            "make it quieter",
+            "make the sound quieter",
+            "reduce the volume",
+        )
+        return any(phrase in text for phrase in phrases)
+
+    def _is_set_volume_command(self, text: str) -> bool:
+        phrases = (
+            "set volume to",
+            "volume to",
+            "make the volume",
+            "change the volume to",
+        )
+        return any(phrase in text for phrase in phrases) and any(char.isdigit() for char in text)
+
+    def _is_brightness_command(self, text: str) -> bool:
+        phrases = (
+            "set brightness",
+            "brightness to",
+            "make the screen brighter",
+            "make screen brighter",
+            "increase brightness",
+            "raise brightness",
+            "make the screen dimmer",
+            "make screen dimmer",
+            "decrease brightness",
+            "lower brightness",
+            "turn brightness up",
+            "turn brightness down",
+        )
+        return any(phrase in text for phrase in phrases)
+
+    def _should_store(self, action: str) -> bool:
+        return action not in {"system", "updates", "audio", "clock", "status", "files"}
+
+    def _should_suggest(self, command: str) -> bool:
+        lowered = command.lower().strip()
+        if not lowered:
+            return False
+        if self._suggestion_cooldown_turns > 0:
+            return False
+        if len(lowered) < 18:
+            return False
+        if self._looks_incomplete(lowered):
+            return False
+        if self._is_message_related(lowered):
+            return False
+        prefixes = (
+            "open ",
+            "find file ",
+            "find folder ",
+            "open folder ",
+            "message ",
+            "text ",
+            "send message to",
+            "set brightness",
+            "wifi ",
+            "bluetooth ",
+            "increase volume",
+            "decrease volume",
+            "check updates",
+            "update apps",
+            "lock pc",
+            "sleep pc",
+        )
+        return not lowered.startswith(prefixes)
+
+    def _looks_incomplete(self, text: str) -> bool:
+        incomplete_endings = (
+            " a",
+            " an",
+            " the",
+            " this is a",
+            " saying",
+            " send",
+            " message",
+            " text",
+            " open",
+            " search",
+        )
+        return any(text.endswith(ending) for ending in incomplete_endings)
+
+    def _is_whatsapp_send_command(self, text: str) -> bool:
+        starters = ("send message to ", "message ", "text ")
+        if text.startswith(starters) and any(word in text for word in (" saying ", " that ", " telling them ")):
+            return True
+        return self._starts_with_contact(text) and any(word in text for word in (" saying ", " that ", " telling them "))
+
+    def _is_message_contact_only_command(self, text: str) -> bool:
+        starters = ("send message to ", "message ", "text ")
+        return text.startswith(starters) and not any(word in text for word in (" saying ", " that ", " telling them "))
+
+    def _is_message_related(self, text: str) -> bool:
+        if self._is_whatsapp_send_command(text) or self._is_message_contact_only_command(text):
+            return True
+        if " saying " in text or " telling them " in text:
+            return any(name in text for name in self.config.contacts)
+        return False
+
+    def _starts_with_contact(self, text: str) -> bool:
+        lowered = text.lower().strip()
+        return any(lowered.startswith(f"{name} ") or lowered == name for name in self.config.contacts)
+
+    def _looks_incomplete_message(self, text: str) -> bool:
+        cleaned = text.lower().strip()
+        if len(cleaned) < 10:
+            return True
+        incomplete_endings = (" a", " an", " the", " this is a", " this is", " that this is a")
+        return any(cleaned.endswith(ending) for ending in incomplete_endings)
+
+    def _polish_reply(self, text: str, action: str) -> str:
+        cleaned = " ".join(text.strip().split())
+        if not cleaned:
+            return text
+        if action in {"audio", "system", "files", "clock", "updates", "status", "message"}:
+            return cleaned
+        if action in {"agent", "quick"}:
+            sentences = re.split(r"(?<=[.!?])\s+", cleaned)
+            return " ".join(sentences[:3]).strip()
+        if action in {"plan", "brainstorm", "think"}:
+            lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+            if len(lines) <= 5:
+                return "\n".join(lines)
+            return "\n".join(lines[:5])
+        return cleaned
 
     def _run_focus_mode(self) -> str:
         actions = [

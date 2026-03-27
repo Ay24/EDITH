@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import os
+from dataclasses import dataclass, field
+from pathlib import Path
 
 
 @dataclass(slots=True)
@@ -13,7 +14,8 @@ class AssistantPersona:
         "You are Edith, an advanced desktop AI assistant inspired by Jarvis. "
         "You feel like a calm, highly intelligent companion: warm, witty, capable, proactive, and dependable. "
         "You help with productivity, media, research, planning, automation, and computer tasks. "
-        "Speak naturally, confidently, and like a helpful big-brain friend."
+        "Speak naturally, confidently, and like a helpful big-brain friend. "
+        "Stay concise, crisp, and interesting."
     )
 
 
@@ -27,7 +29,7 @@ class AppConfig:
     fast_model: str = field(default_factory=lambda: os.getenv("EDITH_FAST_MODEL", "phi3"))
     ollama_executable: str = field(default_factory=lambda: os.getenv("OLLAMA_EXECUTABLE", "ollama"))
     wake_word: str = field(default_factory=lambda: os.getenv("EDITH_WAKE_WORD", "edith"))
-    voice_command_timeout: int = field(default_factory=lambda: int(os.getenv("EDITH_VOICE_TIMEOUT", "4")))
+    voice_command_timeout: int = field(default_factory=lambda: int(os.getenv("EDITH_VOICE_TIMEOUT", "6")))
     auto_listen: bool = field(default_factory=lambda: os.getenv("EDITH_AUTO_LISTEN", "1") != "0")
     require_wake_word: bool = field(default_factory=lambda: os.getenv("EDITH_REQUIRE_WAKE_WORD", "0") == "1")
     lightweight_mode: bool = field(default_factory=lambda: os.getenv("EDITH_LIGHTWEIGHT_MODE", "1") != "0")
@@ -38,12 +40,25 @@ class AppConfig:
             os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\WindowsApps\spotify.exe"),
         )
     )
-    notes_path: str = field(default_factory=lambda: os.getenv("EDITH_NOTES_PATH", "notes.txt"))
+    memory_path: str = field(
+        default_factory=lambda: os.getenv(
+            "EDITH_MEMORY_PATH",
+            str(Path("data") / "edith_memory.jsonl"),
+        )
+    )
+    notes_path: str = field(
+        default_factory=lambda: os.getenv(
+            "EDITH_NOTES_PATH",
+            str(Path("data") / "notes.txt"),
+        )
+    )
     contacts: dict[str, str] = field(
         default_factory=lambda: {
             "primary_contact": "+10000000001",
             "friend_alias": "+10000000001",
             "secondary_contact": "+10000000002",
+            
+            "friend_alias": "+10000000001",
             
             "me": "+10000000003",
         }

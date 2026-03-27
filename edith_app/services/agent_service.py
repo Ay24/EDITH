@@ -25,13 +25,16 @@ class AgentService:
             model=self._config.ollama_model,
             prompt=prompt,
             history=history,
-            system_instruction=self._config.persona.system_prompt,
+            system_instruction=(
+                f"{self._config.persona.system_prompt} "
+                "Default to crisp, direct responses. Usually keep it to 2 to 4 short sentences."
+            ),
         )
 
     def plan(self, prompt: str, history: Iterable[ChatMessage]) -> str:
         instruction = (
             "You are Edith's planning model. Break problems into clear steps, identify tradeoffs, "
-            "and propose a practical path forward."
+            "and propose a practical path forward. Keep the plan punchy and compact."
         )
         return self._run_model(
             model=self._config.planner_model,
@@ -43,7 +46,7 @@ class AgentService:
     def brainstorm(self, prompt: str, history: Iterable[ChatMessage]) -> str:
         instruction = (
             "You are Edith's creative ideation model. Generate bold but practical ideas, alternatives, "
-            "angles, and next experiments."
+            "angles, and next experiments. Keep it lively but compact."
         )
         return self._run_model(
             model=self._config.creative_model,
