@@ -58,18 +58,12 @@ class AppConfig:
             "primary_contact": "+10000000001",
             "friend_alias": "+10000000001",
             "secondary_contact": "+10000000002",
-            
-            "friend_alias": "+10000000001",
-            "friend_alias": "+10000000001",
-            
             "me": "+10000000003",
         }
     )
     whatsapp_display_names: dict[str, str] = field(
         default_factory=lambda: {
             "primary_contact": "Primary Contact",
-            "friend_alias": "Primary Contact",
-            "friend_alias": "Primary Contact",
             "friend_alias": "Primary Contact",
             "secondary_contact": "Secondary Contact",
         }
