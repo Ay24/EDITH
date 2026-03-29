@@ -154,6 +154,10 @@ class EdithAssistant:
             result = CommandResult(self.media.open_site("https://mail.google.com/", "Gmail"), action="browser")
         elif lowered.startswith("open whatsapp"):
             result = CommandResult(self.whatsapp.open_app(), action="system")
+        elif self._is_whatsapp_call_command(lowered):
+            result = CommandResult(self._start_whatsapp_call(command, video=False), action="message")
+        elif self._is_whatsapp_video_call_command(lowered):
+            result = CommandResult(self._start_whatsapp_call(command, video=True), action="message")
         elif self._is_whatsapp_send_command(lowered):
             result = CommandResult(self._send_whatsapp_message(command), action="message")
         elif self._is_message_contact_only_command(lowered):
@@ -372,18 +376,38 @@ class EdithAssistant:
         if not name or not message:
             return "I need both a contact name and a message."
 
-        resolved_name = self._resolve_contact_name(name) or name.strip()
+        resolved_name = self._resolve_whatsapp_name(name)
         if self._looks_incomplete_message(message):
             self._pending_message_contact = resolved_name
             return f"I caught {resolved_name}. Continue your message and I'll send it."
         return self.whatsapp.send_message(resolved_name, message)
+
+    def _start_whatsapp_call(self, command: str, video: bool) -> str:
+        patterns = [
+            r"(?:call|voice call|ring)\s+(.+?)\s+(?:on whatsapp|in whatsapp|through whatsapp)$",
+            r"(?:call|voice call|ring)\s+(.+)$",
+            r"(?:video call)\s+(.+?)\s+(?:on whatsapp|in whatsapp|through whatsapp)$",
+            r"(?:video call)\s+(.+)$",
+        ]
+        name = ""
+        for pattern in patterns:
+            match = re.match(pattern, command, flags=re.IGNORECASE)
+            if match:
+                name = match.group(1).strip()
+                break
+        if not name:
+            return "Tell me who to call on WhatsApp."
+        resolved_name = self._resolve_whatsapp_name(name)
+        if video:
+            return self.whatsapp.video_call(resolved_name)
+        return self.whatsapp.voice_call(resolved_name)
 
     def _start_pending_message(self, command: str) -> str:
         match = re.match(r"(?:send message to|message|text)\s+(.+)", command, flags=re.IGNORECASE)
         if not match:
             return "Tell me who the message is for."
         name = match.group(1).strip()
-        resolved_name = self._resolve_contact_name(name) or name
+        resolved_name = self._resolve_whatsapp_name(name)
         self._pending_message_contact = resolved_name
         return f"What should I send to {resolved_name}?"
 
@@ -400,6 +424,19 @@ class EdithAssistant:
             if saved_name.lower() == lowered:
                 return saved_name
         return None
+
+    def _resolve_whatsapp_name(self, spoken_name: str) -> str:
+        lowered = spoken_name.lower().strip()
+        configured = self.config.whatsapp_display_names.get(lowered)
+        if configured:
+            return configured
+        resolved_contact = self._resolve_contact_name(spoken_name)
+        if resolved_contact is not None:
+            configured = self.config.whatsapp_display_names.get(resolved_contact.lower())
+            if configured:
+                return configured
+            return resolved_contact
+        return spoken_name.strip()
 
     def _contact_name_pattern(self) -> str:
         names = sorted(self.config.contacts.keys(), key=len, reverse=True)
@@ -637,6 +674,15 @@ class EdithAssistant:
         if text.startswith(starters) and any(word in text for word in (" saying ", " that ", " telling them ")):
             return True
         return self._starts_with_contact(text) and any(word in text for word in (" saying ", " that ", " telling them "))
+
+    def _is_whatsapp_call_command(self, text: str) -> bool:
+        return (
+            (text.startswith("call ") or text.startswith("voice call ") or text.startswith("ring "))
+            and "video call" not in text
+        )
+
+    def _is_whatsapp_video_call_command(self, text: str) -> bool:
+        return text.startswith("video call ")
 
     def _is_message_contact_only_command(self, text: str) -> bool:
         starters = ("send message to ", "message ", "text ")

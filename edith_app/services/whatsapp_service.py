@@ -53,6 +53,36 @@ class WhatsAppService:
         except Exception as exc:
             return f"I couldn't send the WhatsApp message: {exc}"
 
+    def voice_call(self, contact_name: str) -> str:
+        if not self.available:
+            return "WhatsApp calling needs pyautogui and pyperclip installed."
+
+        self.open_app()
+        time.sleep(3.5)
+
+        try:
+            if not self._open_chat(contact_name):
+                return f"I couldn't open the WhatsApp chat for {contact_name}."
+            pyautogui.hotkey("ctrl", "shift", "c")
+            return f"Starting a WhatsApp voice call with {contact_name}."
+        except Exception as exc:
+            return f"I couldn't start the WhatsApp voice call: {exc}"
+
+    def video_call(self, contact_name: str) -> str:
+        if not self.available:
+            return "WhatsApp calling needs pyautogui and pyperclip installed."
+
+        self.open_app()
+        time.sleep(3.5)
+
+        try:
+            if not self._open_chat(contact_name):
+                return f"I couldn't open the WhatsApp chat for {contact_name}."
+            pyautogui.hotkey("ctrl", "shift", "v")
+            return f"Starting a WhatsApp video call with {contact_name}."
+        except Exception as exc:
+            return f"I couldn't start the WhatsApp video call: {exc}"
+
     def read_current_chat(self) -> str:
         if not self.available:
             return "WhatsApp reading needs pyautogui and pyperclip installed."
@@ -71,6 +101,21 @@ class WhatsAppService:
             return copied[-2000:]
         except Exception as exc:
             return f"I couldn't read the current WhatsApp chat: {exc}"
+
+    def _open_chat(self, contact_name: str) -> bool:
+        exact_name = contact_name.strip()
+        if not exact_name:
+            return False
+
+        pyautogui.hotkey("ctrl", "f")
+        time.sleep(0.4)
+        pyautogui.hotkey("ctrl", "a")
+        pyautogui.write(exact_name, interval=0.02)
+        time.sleep(1.0)
+        pyautogui.press("down")
+        pyautogui.press("enter")
+        time.sleep(0.8)
+        return True
 
     def _open_chat(self, contact_name: str) -> bool:
         exact_name = contact_name.strip()
