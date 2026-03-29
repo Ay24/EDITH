@@ -53,10 +53,13 @@ class EdithAssistant:
         )
 
     def greet(self) -> str:
+        remembered = self.memory.recent(limit=4, include_actions={"agent", "brainstorm", "plan", "think", "quick", "note"})
         greeting = (
             f"{self.config.persona.name} online. Local agent, voice controls, media automations, "
             "and desktop routines are ready."
         )
+        if remembered:
+            greeting += f" I restored {len(remembered)} recent conversation memories."
         self._remember("assistant", greeting)
         return greeting
 
@@ -121,6 +124,9 @@ class EdithAssistant:
             result = CommandResult(self.media.search_youtube(query or "music"), action="youtube")
         elif lowered.startswith("open spotify"):
             result = CommandResult(self.media.open_spotify(), action="spotify")
+        elif "play" in lowered and "on spotify" in lowered:
+            query = lowered.replace("play", "", 1).replace("on spotify", "", 1).strip()
+            result = CommandResult(self.media.play_spotify(query or "music"), action="spotify")
         elif lowered.startswith("spotify search"):
             query = self._strip_words(lowered, ["spotify search"])
             result = CommandResult(self.media.search_spotify(query or "cinematic soundtrack"), action="spotify")
@@ -130,6 +136,11 @@ class EdithAssistant:
         elif lowered.startswith("search google for"):
             query = self._strip_words(lowered, ["search google for"])
             result = CommandResult(self._google(query), action="browser")
+        elif lowered in {"latest news", "news", "latest news please"}:
+            result = CommandResult(self.system.search_web("latest news today"), action="browser")
+        elif lowered.startswith("search for "):
+            query = command[len("search for "):].strip()
+            result = CommandResult(self._search_files_or_web(query), action="files")
         elif lowered.startswith("search the web for") or lowered.startswith("look up ") or lowered.startswith("browse "):
             query = self._strip_words(lowered, ["search the web for", "look up", "browse"])
             result = CommandResult(self.system.search_web(query), action="browser")
@@ -152,9 +163,15 @@ class EdithAssistant:
         elif lowered.startswith("open folder "):
             target = command[len("open folder "):].strip()
             result = CommandResult(self.system.open_folder(target), action="files")
+        elif self._is_open_item_in_folder_command(command):
+            item_name, folder_name = self._parse_open_item_in_folder(command)
+            result = CommandResult(self.system.open_item_in_folder(item_name, folder_name), action="files")
         elif lowered.startswith("find file ") or lowered.startswith("find folder "):
             query = command.split(" ", 2)[2].strip()
             result = CommandResult(self._search_files(query), action="files")
+        elif self._is_find_item_in_folder_command(command):
+            item_name, folder_name = self._parse_find_item_in_folder(command)
+            result = CommandResult(self._search_files_in_folder(item_name, folder_name), action="files")
         elif lowered.startswith("find ") and ("on my system" in lowered or "in my system" in lowered):
             query = (
                 lowered.replace("find", "", 1)
@@ -171,6 +188,12 @@ class EdithAssistant:
             result = CommandResult(self.system.open_app("settings"), action="system")
         elif lowered.startswith("open explorer") or lowered.startswith("open files"):
             result = CommandResult(self.system.open_app("explorer"), action="system")
+        elif lowered in {"open downloads", "open downloads in files"}:
+            result = CommandResult(self.system.open_target("downloads"), action="files")
+        elif lowered in {"open documents", "open documents in files"}:
+            result = CommandResult(self.system.open_target("documents"), action="files")
+        elif lowered in {"open desktop", "open desktop in files"}:
+            result = CommandResult(self.system.open_target("desktop"), action="files")
         elif lowered.startswith("go to ") and len(lowered.split()) >= 2:
             target = command[len("go to "):].strip()
             result = CommandResult(self.system.open_target(target), action="browser")
@@ -193,6 +216,8 @@ class EdithAssistant:
             result = CommandResult(self.audio.adjust_volume(-0.1), action="audio")
         elif self._is_set_volume_command(lowered):
             result = CommandResult(self.audio.set_volume(self._extract_number(lowered, default=50)), action="audio")
+        elif lowered in {"set volume", "set volume to", "volume", "change volume"}:
+            result = CommandResult("Tell me a volume level, for example: set volume to 60.", action="audio")
         elif lowered in {"mute", "mute volume", "mute audio", "turn off volume"}:
             result = CommandResult(self.audio.mute(), action="audio")
         elif lowered in {"unmute", "unmute volume", "unmute audio", "turn on volume"}:
@@ -204,9 +229,18 @@ class EdithAssistant:
             result = CommandResult(self.system.wifi(True), action="system")
         elif lowered in {"wifi off", "turn wifi off", "disable wifi"}:
             result = CommandResult(self.system.wifi(False), action="system")
-        elif lowered in {"bluetooth on", "bluetooth off", "open bluetooth", "bluetooth settings"}:
-            result = CommandResult(self.system.bluetooth_settings(), action="system")
-        elif lowered in {"check updates", "check for updates"}:
+        elif lowered in {
+            "bluetooth on",
+            "bluetooth off",
+            "turn on bluetooth",
+            "turn off bluetooth",
+            "enable bluetooth",
+            "disable bluetooth",
+            "open bluetooth",
+            "bluetooth settings",
+        }:
+            result = CommandResult(self._handle_bluetooth_command(lowered), action="system")
+        elif lowered in {"check updates", "check for updates"} or lowered.startswith("check for upda"):
             result = CommandResult(self.system.check_updates(), action="updates")
         elif lowered in {"update apps", "upgrade apps", "update everything"}:
             result = CommandResult(self.system.upgrade_apps(), action="updates")
@@ -235,9 +269,11 @@ class EdithAssistant:
                 f"creative={self.config.creative_model}, fast={self.config.fast_model}.",
                 action="status",
             )
-        elif lowered.startswith("brainstorm "):
-            topic = command[len("brainstorm "):].strip()
+        elif lowered.startswith("brainstorm ") or lowered.startswith("brain storm "):
+            topic = re.sub(r"^brain\s*storm\s+", "", command, flags=re.IGNORECASE).strip()
             result = CommandResult(self.agent.brainstorm(topic, self.history), action="brainstorm")
+        elif lowered in {"brainstorm", "brain stor", "brain storm"}:
+            result = CommandResult("Tell me what to brainstorm.", action="brainstorm")
         elif lowered.startswith("plan "):
             topic = command[len("plan "):].strip()
             result = CommandResult(self.agent.plan(topic, self.history), action="plan")
@@ -260,13 +296,13 @@ class EdithAssistant:
                     self._remember("assistant", result.reply)
                     return result
             entities = self.knowledge.extract_entities(command)
-            reply = self.agent.reply(command, self.history)
+            reply = self.agent.reply(self._contextualize_prompt(command), self._context_history())
             metadata = {"entities": ", ".join(entities)} if entities else {}
             result = CommandResult(reply=reply, action="agent", metadata=metadata)
 
         result.reply = self._polish_reply(result.reply, result.action)
         self._remember("assistant", result.reply)
-        if self._should_store(result.action):
+        if self._should_store_interaction(command, result):
             self.memory.remember(command, result.reply, result.action)
         if self._suggestion_cooldown_turns > 0:
             self._suggestion_cooldown_turns -= 1
@@ -376,6 +412,51 @@ class EdithAssistant:
         formatted = "\n".join(matches[:8])
         return f"I found these matches for {query}:\n{formatted}"
 
+    def _search_files_in_folder(self, query: str, folder: str) -> str:
+        matches = self.system.search_within_folder(query, folder, limit=8)
+        if not matches:
+            return f"I couldn't find {query} inside {folder}."
+        formatted = "\n".join(matches[:8])
+        return f"I found these matches for {query} inside {folder}:\n{formatted}"
+
+    def _search_files_or_web(self, query: str) -> str:
+        matches = self.system.search_files(query)
+        if matches:
+            formatted = "\n".join(matches[:6])
+            return f"I found these local matches for {query}:\n{formatted}"
+        return self.system.search_web(query)
+
+    def _contextualize_prompt(self, command: str) -> str:
+        relevant = self.memory.relevant(command, limit=3)
+        if not relevant:
+            return command
+        memory_lines = [
+            f"- Earlier request: {item.command} | Edith replied: {item.reply}"
+            for item in relevant
+        ]
+        return (
+            "Use this remembered context if it helps, but do not override the user's current intent.\n"
+            "Remembered context:\n"
+            + "\n".join(memory_lines)
+            + f"\nCurrent user request: {command}"
+        )
+
+    def _context_history(self) -> list[ChatMessage]:
+        history = list(self.history[-10:])
+        recent_memory = self.memory.recent(limit=4, include_actions={"agent", "brainstorm", "plan", "think", "quick", "note"})
+        remembered_messages: list[ChatMessage] = []
+        for item in recent_memory:
+            remembered_messages.append(ChatMessage(source="assistant", text=f"Remembered user request: {item.command}"))
+            remembered_messages.append(ChatMessage(source="assistant", text=f"Remembered reply: {item.reply}"))
+        return (remembered_messages + history)[-14:]
+
+    def _handle_bluetooth_command(self, lowered: str) -> str:
+        if lowered in {"bluetooth off", "turn off bluetooth", "disable bluetooth"}:
+            return self.system.bluetooth(False)
+        if lowered in {"bluetooth on", "turn on bluetooth", "enable bluetooth"}:
+            return self.system.bluetooth(True)
+        return self.system.bluetooth_settings()
+
     def _extract_number(self, text: str, default: int = 50) -> int:
         numbers = re.findall(r"\d+", text)
         if not numbers:
@@ -434,8 +515,75 @@ class EdithAssistant:
         )
         return any(phrase in text for phrase in phrases)
 
+    def _is_open_item_in_folder_command(self, text: str) -> bool:
+        lowered = text.lower().strip()
+        return lowered.startswith("open ") and " in " in lowered and not lowered.startswith("open folder ")
+
+    def _parse_open_item_in_folder(self, text: str) -> tuple[str, str]:
+        cleaned = re.sub(r"^open\s+", "", text, flags=re.IGNORECASE).strip()
+        item_name, folder_name = re.split(r"\s+in\s+", cleaned, maxsplit=1, flags=re.IGNORECASE)
+        return item_name.strip(), folder_name.strip()
+
+    def _is_find_item_in_folder_command(self, text: str) -> bool:
+        lowered = text.lower().strip()
+        return lowered.startswith("find ") and " in " in lowered and " on my system" not in lowered and " in my system" not in lowered
+
+    def _parse_find_item_in_folder(self, text: str) -> tuple[str, str]:
+        cleaned = re.sub(r"^find\s+", "", text, flags=re.IGNORECASE).strip()
+        item_name, folder_name = re.split(r"\s+in\s+", cleaned, maxsplit=1, flags=re.IGNORECASE)
+        return item_name.strip(), folder_name.strip()
+
     def _should_store(self, action: str) -> bool:
         return action not in {"system", "updates", "audio", "clock", "status", "files"}
+
+    def _should_store_interaction(self, command: str, result: CommandResult) -> bool:
+        lowered = command.lower().strip()
+        reply = result.reply.lower().strip()
+
+        if not self._should_store(result.action):
+            return False
+        if len(lowered) < 8:
+            return False
+        if self._looks_incomplete(lowered) or self._looks_incomplete_message(lowered):
+            return False
+        if result.action in {"memory", "help"}:
+            return False
+
+        failure_markers = (
+            "i couldn't",
+            "i could not",
+            "i can't",
+            "i cannot",
+            "unavailable",
+            "didn't catch",
+            "did not catch",
+            "tell me ",
+            "need both",
+            "need a",
+            "not recognized",
+            "not available",
+            "still warming up",
+            "starting up",
+            "try again",
+            "error",
+            "offline",
+            "no speech captured",
+            "no update information",
+            "i don't know a saved contact",
+        )
+        if any(marker in reply for marker in failure_markers):
+            return False
+
+        command_noise = (
+            "brain stor",
+            "set volume",
+            "set volume to",
+            "check for upda",
+        )
+        if lowered in command_noise:
+            return False
+
+        return True
 
     def _should_suggest(self, command: str) -> bool:
         lowered = command.lower().strip()

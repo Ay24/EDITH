@@ -2,10 +2,16 @@
 
 import os
 import subprocess
+import time
 import urllib.parse
 import webbrowser
 
 from edith_app.config import AppConfig
+
+try:
+    import pyautogui
+except ImportError:
+    pyautogui = None
 
 try:
     import pywhatkit
@@ -70,9 +76,17 @@ class MediaService:
         lowered = vibe.lower()
         for key, uri in self._spotify_playlists.items():
             if key in lowered:
-                if self._open_spotify_uri(uri):
-                    return f"Opening a Spotify {key} playlist."
+                if self._play_spotify_uri(uri):
+                    return f"Playing a Spotify {key} playlist."
         return self.search_spotify(f"{vibe} playlist")
+
+    def play_spotify(self, query: str) -> str:
+        deep_link = f"spotify:search:{query}"
+        if self._play_spotify_uri(deep_link):
+            return f"Playing {query} on Spotify."
+        encoded = urllib.parse.quote_plus(query)
+        webbrowser.open(f"https://open.spotify.com/search/{encoded}")
+        return f"Opening Spotify search for {query}."
 
     def open_site(self, url: str, label: str) -> str:
         webbrowser.open(url)
@@ -84,3 +98,16 @@ class MediaService:
             return True
         except Exception:
             return False
+
+    def _play_spotify_uri(self, uri: str) -> bool:
+        if not self._open_spotify_uri(uri):
+            return False
+        if pyautogui is None:
+            return True
+        try:
+            time.sleep(2.2)
+            pyautogui.press("tab")
+            pyautogui.press("enter")
+            return True
+        except Exception:
+            return True

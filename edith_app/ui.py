@@ -42,6 +42,7 @@ class EdithDesktopUI:
         self.immersive_canvas: tk.Canvas | None = None
         self.immersive_orb = None
         self.immersive_glow = None
+        self._queued_voice_state = "idle"
 
         self._build_theme()
         self._build_layout()
@@ -368,12 +369,12 @@ class EdithDesktopUI:
         }
         while not self.stop_event.is_set():
             if self.assistant.audio.is_speaking:
-                self.voice_queue.put(("voice_state", "speaking"))
+                self._queue_voice_state("speaking")
                 heard = self.assistant.listen_for_interrupt().strip()
                 if heard in interrupt_phrases:
                     self.assistant.stop_speaking()
                     self.voice_queue.put(("system", "Speech interrupted."))
-                    self.voice_queue.put(("voice_state", "listening"))
+                    self._queue_voice_state("listening")
                 elif heard:
                     self.assistant.stop_speaking()
                     self.voice_queue.put(("system", f"Interrupted by: {heard}"))
@@ -381,7 +382,7 @@ class EdithDesktopUI:
                 else:
                     time.sleep(0.05)
                 continue
-            self.voice_queue.put(("voice_state", "listening"))
+            self._queue_voice_state("listening")
             heard = self.assistant.listen_for_command().strip()
             if not heard:
                 continue
@@ -394,13 +395,13 @@ class EdithDesktopUI:
                     self.voice_queue.put(("system", f"Wake word detected from: {heard}"))
                     self.voice_queue.put(("voice_command", cleaned))
                 else:
-                    self.voice_queue.put(("voice_state", "processing"))
+                    self._queue_voice_state("processing")
                     command = self.assistant.listen_for_command()
                     if command:
                         self.voice_queue.put(("voice_command", command))
                     else:
                         self.voice_queue.put(("error", "Wake word heard, but no follow-up command was captured."))
-                        self.voice_queue.put(("voice_state", "listening"))
+                        self._queue_voice_state("listening")
             else:
                 self.voice_queue.put(("voice_command", heard))
 
@@ -419,6 +420,7 @@ class EdithDesktopUI:
                     if not self.assistant.audio.is_speaking:
                         self._set_voice_state("listening")
             elif kind == "voice_state":
+                self._queued_voice_state = payload
                 voice_text = {
                     "idle": "Voice: idle",
                     "listening": "Voice: continuous listening active" if self.voice_enabled else "Voice: idle",
@@ -430,6 +432,12 @@ class EdithDesktopUI:
             else:
                 self._append(kind, payload)
         self.root.after(80, self._process_voice_queue)
+
+    def _queue_voice_state(self, state: str) -> None:
+        if state == self._queued_voice_state:
+            return
+        self._queued_voice_state = state
+        self.voice_queue.put(("voice_state", state))
 
     def _toggle_immersive_mode(self) -> None:
         if self.immersive_window is not None and self.immersive_window.winfo_exists():

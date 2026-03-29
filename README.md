@@ -1,137 +1,81 @@
-<<<<<<< HEAD
-# EDITH
-A complete local system assitant exactly like edith and jarvis which will make you feel Like you are talking to your system 
-=======
-﻿# Edith Command Center
+# Edith Command Center
 
-Edith is a polished desktop assistant project with a modular architecture, multi-model local open-source agent support, better media automations, NLP hooks, voice capture, and Windows-style utility actions.
+Edith is a Windows desktop assistant with voice control, Ollama-powered reasoning, media automation, system actions, persistent memory, and an immersive Jarvis-style UI.
 
-## Free Open-Source Agent Path
+## Features
 
-This version no longer depends on OpenAI.
+- Multi-model local agent through Ollama
+- Automatic Ollama startup and model pulling on launch
+- F-drive Ollama model storage support through `OLLAMA_MODELS`
+- Continuous voice listening with interrupt support
+- YouTube and Spotify automation
+- WhatsApp Desktop automation
+- Windows controls for volume, brightness, Wi-Fi, updates, lock, and more
+- Persistent memory and notes
+- Animated UI with immersive mode and live speaking/listening states
 
-It uses a free local-agent route through Ollama. Recommended local models:
-- `llama3.2`
-- `mistral`
-- `phi3`
-- `qwen2.5`
+## Project Layout
 
-Recommended multi-model role mapping:
-- main chat: `llama3.2`
-- planner: `qwen2.5`
-- creative: `mistral`
-- fast tactical: `phi3`
+- `main.py`: launcher
+- `edith_app/app.py`: app bootstrap
+- `edith_app/assistant.py`: command routing and orchestration
+- `edith_app/services/`: voice, audio, agent, knowledge, media, system, memory, and messaging services
+- `edith_app/ui.py`: desktop interface and immersive mode
 
-Set these optional environment variables if you want to customize the backend:
+## Setup
+
+1. Install Python 3.11 or newer.
+2. Install the project:
+   `pip install -e .`
+3. Install Ollama on Windows.
+4. Run Edith:
+   `python main.py`
+
+On startup, Edith now tries to:
+- start Ollama automatically
+- use `F:\OllamaModels` for model storage by default
+- pull missing required models automatically when allowed
+
+## Store Ollama Models on F Drive
+
+Edith is configured to use:
+- `F:\OllamaModels`
+
+To make Ollama itself use that location consistently on Windows:
+```bat
+setx OLLAMA_MODELS F:\OllamaModels
+```
+
+Then fully close and reopen Ollama before starting Edith again.
+
+## Environment Variables
+
 - `OLLAMA_URL`
+- `OLLAMA_MODELS`
 - `OLLAMA_MODEL`
 - `EDITH_PLANNER_MODEL`
 - `EDITH_CREATIVE_MODEL`
 - `EDITH_FAST_MODEL`
-- `SPOTIFY_APP_PATH`
-- `EDITH_NOTES_PATH`
 - `EDITH_WAKE_WORD`
 - `EDITH_AUTO_LISTEN`
 - `EDITH_REQUIRE_WAKE_WORD`
 - `EDITH_LIGHTWEIGHT_MODE`
 - `EDITH_AUTO_PULL_MODELS`
 
-## Features
-
-- Local LLM-backed conversational agent through Ollama
-- Multi-model brainstorming, planning, and paired-thinking flows
-- spaCy-powered entity extraction hooks
-- Speech recognition and text-to-speech support
-- Continuous listening mode that can run until you manually stop it
-- Interruptible speech, so new commands can cut off current speaking
-- YouTube automation for direct play, home, and mix launching
-- Spotify automation for launch, deep-link search, and playlist vibe flows
-- Windows-like utility actions for Calculator, Notepad, Explorer, Settings, date, and time
-- Broader system control hooks for brightness, Wi-Fi, updates, lock, sleep, and app launching
-- File and folder search across common user directories
-- Timestamped note capture
-- Persistent memory for non-system conversations across runs
-- WhatsApp Desktop automation for sending messages by voice
-- Status dashboard and quick-action desktop interface
-
-## Project Layout
-
-- `main.py`: launcher
-- `edith_app/app.py`: bootstrap
-- `edith_app/assistant.py`: command orchestration
-- `edith_app/services/`: agent, audio, knowledge, media, notes, and voice services
-- `edith_app/ui.py`: desktop command center
-
-## Setup
-
-1. Install Python 3.11 or newer.
-2. Create a fresh virtual environment.
-3. Install the project:
-   `pip install -e .`
-4. Optionally install the spaCy English model:
-   `python -m spacy download en_core_web_sm`
-5. Install Ollama once so the `ollama` command exists on Windows.
-6. Run the app:
-   `python main.py`
-   or
-   `python -m edith_app`
-   or
-   `edith`
-
-At startup Edith now tries to start Ollama automatically.
-Voice mode now starts automatically by default and listens continuously unless you stop it.
-By default Edith accepts direct spoken commands even without the wake word.
-Edith now stores non-system chats across runs and can ask if you meant a similar previous intent.
-
-For lower-end systems, Edith now defaults to a lighter setup:
-- `phi3` is the default main model
-- lightweight mode is on by default
-- automatic model pulling is off by default
-- the heavy spaCy model is skipped unless you disable lightweight mode
-- active voice listening pauses while Edith is speaking to reduce false self-triggers
-
-## GitHub
-
-This repository now includes:
-- `.gitignore`
-- `pyproject.toml`
-- `.env.example`
-
-Local runtime data like memory files, notes, virtual environments, and cache files are ignored from Git by default.
-
 ## Example Commands
 
-- `open youtube`
-- `open notebooklm`
-- `go to notebooklm`
-- `youtube mix for synthwave coding`
-- `play interstellar soundtrack on youtube`
-- `open spotify`
-- `open whatsapp`
-- `send message to Alisha saying I am on the way`
-- `read my whatsapp messages`
-- `spotify search lofi jazz`
-- `spotify playlist deep focus`
-- `brainstorm how to automate my workflow`
-- `plan a daily automation workflow`
-- `think with me about building a personal AI system`
-- `find file invoice`
-- `open folder %USERPROFILE%\\Documents`
-- `set brightness to 60`
-- `make the screen brighter`
-- `make the screen dimmer`
-- `wifi on`
-- `check updates`
-- `update apps`
-- `lock pc`
-- `open calculator`
-- `turn up the volume`
-- `make it quieter`
-- `open notepad`
-- `open settings`
-- `search google for best windows automation tools`
-- `search the web for python desktop automation`
-- `find budget on my system`
-- `save note polish the UI tonight`
 - `system status`
->>>>>>> 68bfa2b (Updating on EDITH APP)
+- `open notebooklm`
+- `play interstellar soundtrack on youtube`
+- `spotify playlist deep focus`
+- `message primary_contact saying this is a test message`
+- `set volume to 40`
+- `mute`
+- `brainstorm a local-first AI product`
+- `plan my study workflow`
+
+## Notes
+
+- Speech recognition currently uses the installed speech recognition pipeline.
+- Online services like YouTube, Spotify, Google, Wikipedia, and WhatsApp sending still depend on their respective services being reachable.
+- If Ollama is starting or a model is still being pulled, Edith will ask you to wait briefly and try again.

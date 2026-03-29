@@ -44,6 +44,21 @@ class MemoryService:
                 best_item = item
         return best_item
 
+    def relevant(self, command: str, limit: int = 4, threshold: float = 0.45) -> list[MemoryItem]:
+        command = command.strip().lower()
+        scored: list[tuple[float, MemoryItem]] = []
+        for item in reversed(self._items[-200:]):
+            score = SequenceMatcher(None, command, item.command.lower()).ratio()
+            if score >= threshold:
+                scored.append((score, item))
+        scored.sort(key=lambda entry: entry[0], reverse=True)
+        return [item for _, item in scored[:limit]]
+
+    def recent(self, limit: int = 8, include_actions: set[str] | None = None) -> list[MemoryItem]:
+        if include_actions is None:
+            return self._items[-limit:]
+        return [item for item in self._items if item.action in include_actions][-limit:]
+
     def _load(self) -> None:
         if not self._path.exists():
             return

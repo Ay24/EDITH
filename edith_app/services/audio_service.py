@@ -1,13 +1,8 @@
 from __future__ import annotations
 
-import queue
+import base64
+import subprocess
 import threading
-from ctypes import POINTER, cast
-
-try:
-    import pyttsx3
-except ImportError:
-    pyttsx3 = None
 
 try:
     from comtypes import CLSCTX_ALL
@@ -15,35 +10,31 @@ except ImportError:
     CLSCTX_ALL = None
 
 try:
+    import pyautogui
+except ImportError:
+    pyautogui = None
+
+try:
+    from ctypes import POINTER, cast
     from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
 except ImportError:
+    POINTER = None
+    cast = None
     AudioUtilities = None
     IAudioEndpointVolume = None
 
 
 class AudioService:
     def __init__(self) -> None:
-        self._engine = None
-        self._speech_queue: queue.Queue[str | None] = queue.Queue()
+        self._speech_process: subprocess.Popen | None = None
         self._lock = threading.Lock()
         self._speaking = False
-        self._worker: threading.Thread | None = None
-
-        if pyttsx3 is None:
-            return
-        try:
-            self._engine = pyttsx3.init()
-            self._engine.setProperty("rate", 176)
-            self._engine.setProperty("volume", 0.95)
-            self._worker = threading.Thread(target=self._speech_loop, daemon=True)
-            self._worker.start()
-        except Exception:
-            self._engine = None
-            self._worker = None
+        self._fallback_volume = 50
+        self._fallback_muted = False
 
     @property
     def tts_enabled(self) -> bool:
-        return self._engine is not None
+        return True
 
     @property
     def system_audio_enabled(self) -> bool:
@@ -51,83 +42,142 @@ class AudioService:
 
     @property
     def is_speaking(self) -> bool:
-        return self._speaking
+        with self._lock:
+            if self._speech_process is not None and self._speech_process.poll() is not None:
+                self._speech_process = None
+                self._speaking = False
+            return self._speaking
 
     def speak(self, text: str) -> None:
-        if self._engine is None:
-            return
         cleaned = " ".join(text.strip().split())
         if not cleaned:
             return
         self.stop()
-        self._speech_queue.put(cleaned)
-
-    def stop(self) -> None:
-        if self._engine is None:
+        script = (
+            "Add-Type -AssemblyName System.Speech;"
+            "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer;"
+            "$s.Rate = 1;"
+            "$s.Volume = 100;"
+            f"$s.Speak('{self._escape_ps(cleaned)}');"
+        )
+        encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+        try:
+            process = subprocess.Popen(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-EncodedCommand",
+                    encoded,
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
             return
         with self._lock:
+            self._speech_process = process
+            self._speaking = True
+        threading.Thread(target=self._watch_speech_process, args=(process,), daemon=True).start()
+
+    def stop(self) -> None:
+        with self._lock:
+            process = self._speech_process
+            self._speech_process = None
+            self._speaking = False
+        if process is None:
+            return
+        try:
+            process.terminate()
+            process.wait(timeout=1)
+        except Exception:
             try:
-                while True:
-                    self._speech_queue.get_nowait()
-            except queue.Empty:
-                pass
-            try:
-                self._engine.stop()
+                process.kill()
             except Exception:
                 pass
-            finally:
-                self._speaking = False
 
     def adjust_volume(self, delta: float) -> str:
         endpoint = self._get_endpoint_volume()
-        if endpoint is None:
-            return "System volume controls are unavailable on this machine."
-        current = endpoint.GetMasterVolumeLevelScalar()
-        new_volume = max(0.0, min(1.0, current + delta))
-        endpoint.SetMasterVolumeLevelScalar(new_volume, None)
-        return f"Volume is now {int(new_volume * 100)}%."
+        if endpoint is not None:
+            current = endpoint.GetMasterVolumeLevelScalar()
+            new_volume = max(0.0, min(1.0, current + delta))
+            endpoint.SetMasterVolumeLevelScalar(new_volume, None)
+            return f"Volume is now {int(new_volume * 100)}%."
+        if pyautogui is not None:
+            presses = max(1, int(abs(delta) * 50))
+            key = "volumeup" if delta > 0 else "volumedown"
+            try:
+                for _ in range(presses):
+                    pyautogui.press(key)
+                self._fallback_muted = False
+                direction = 2 * presses if delta > 0 else -2 * presses
+                self._fallback_volume = max(0, min(100, self._fallback_volume + direction))
+                return "Adjusted system volume."
+            except Exception:
+                pass
+        return "System volume controls are unavailable on this machine."
 
     def set_volume(self, level: int) -> str:
         endpoint = self._get_endpoint_volume()
-        if endpoint is None:
-            return "System volume controls are unavailable on this machine."
         bounded = max(0, min(100, level))
-        endpoint.SetMasterVolumeLevelScalar(bounded / 100.0, None)
-        return f"Volume set to {bounded}%."
+        if endpoint is not None:
+            endpoint.SetMasterVolumeLevelScalar(bounded / 100.0, None)
+            return f"Volume set to {bounded}%."
+        if pyautogui is not None:
+            try:
+                current = 0 if self._fallback_muted else self._fallback_volume
+                presses = max(0, min(50, abs(bounded - current) // 2))
+                key = "volumeup" if bounded >= current else "volumedown"
+                for _ in range(presses):
+                    pyautogui.press(key)
+                self._fallback_volume = bounded
+                self._fallback_muted = bounded == 0
+                return f"Volume set close to {bounded}%."
+            except Exception:
+                pass
+        return "System volume controls are unavailable on this machine."
 
     def mute(self) -> str:
         endpoint = self._get_endpoint_volume()
-        if endpoint is None:
-            return "System volume controls are unavailable on this machine."
-        endpoint.SetMute(1, None)
-        return "Volume muted."
+        if endpoint is not None:
+            endpoint.SetMute(1, None)
+            return "Volume muted."
+        if pyautogui is not None:
+            try:
+                pyautogui.press("volumemute")
+                self._fallback_muted = True
+                return "Volume muted."
+            except Exception:
+                pass
+        return "System volume controls are unavailable on this machine."
 
     def unmute(self) -> str:
         endpoint = self._get_endpoint_volume()
-        if endpoint is None:
-            return "System volume controls are unavailable on this machine."
-        endpoint.SetMute(0, None)
-        return "Volume unmuted."
+        if endpoint is not None:
+            endpoint.SetMute(0, None)
+            return "Volume unmuted."
+        if pyautogui is not None:
+            try:
+                pyautogui.press("volumemute")
+                self._fallback_muted = False
+                return "Volume unmuted."
+            except Exception:
+                pass
+        return "System volume controls are unavailable on this machine."
 
-    def _speech_loop(self) -> None:
-        while True:
-            text = self._speech_queue.get()
-            if text is None:
-                return
-            if self._engine is None:
-                continue
-            with self._lock:
-                self._speaking = True
-                try:
-                    self._engine.say(text)
-                    self._engine.runAndWait()
-                except Exception:
-                    pass
-                finally:
-                    self._speaking = False
+    def _watch_speech_process(self, process: subprocess.Popen) -> None:
+        try:
+            process.wait()
+        except Exception:
+            pass
+        with self._lock:
+            if self._speech_process is process:
+                self._speech_process = None
+                self._speaking = False
 
     def _get_endpoint_volume(self):
-        if not self.system_audio_enabled:
+        if not self.system_audio_enabled or POINTER is None or cast is None:
             return None
         try:
             device = AudioUtilities.GetSpeakers()
@@ -135,3 +185,6 @@ class AudioService:
             return cast(interface, POINTER(IAudioEndpointVolume))
         except Exception:
             return None
+
+    def _escape_ps(self, text: str) -> str:
+        return text.replace("'", "''")

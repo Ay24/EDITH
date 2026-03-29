@@ -28,12 +28,13 @@ class AppConfig:
     creative_model: str = field(default_factory=lambda: os.getenv("EDITH_CREATIVE_MODEL", "mistral"))
     fast_model: str = field(default_factory=lambda: os.getenv("EDITH_FAST_MODEL", "phi3"))
     ollama_executable: str = field(default_factory=lambda: os.getenv("OLLAMA_EXECUTABLE", "ollama"))
+    ollama_models_path: str = field(default_factory=lambda: os.getenv("OLLAMA_MODELS", r"F:\OllamaModels"))
     wake_word: str = field(default_factory=lambda: os.getenv("EDITH_WAKE_WORD", "edith"))
     voice_command_timeout: int = field(default_factory=lambda: int(os.getenv("EDITH_VOICE_TIMEOUT", "6")))
     auto_listen: bool = field(default_factory=lambda: os.getenv("EDITH_AUTO_LISTEN", "1") != "0")
     require_wake_word: bool = field(default_factory=lambda: os.getenv("EDITH_REQUIRE_WAKE_WORD", "0") == "1")
     lightweight_mode: bool = field(default_factory=lambda: os.getenv("EDITH_LIGHTWEIGHT_MODE", "1") != "0")
-    auto_pull_models: bool = field(default_factory=lambda: os.getenv("EDITH_AUTO_PULL_MODELS", "0") == "1")
+    auto_pull_models: bool = field(default_factory=lambda: os.getenv("EDITH_AUTO_PULL_MODELS", "1") != "0")
     spotify_app_path: str = field(
         default_factory=lambda: os.getenv(
             "SPOTIFY_APP_PATH",

@@ -21,41 +21,24 @@ class VoiceService:
         return self._recognizer is not None
 
     def listen_once(self) -> str:
-        if sr is None or self._recognizer is None:
-            return ""
-        try:
-            with sr.Microphone() as source:
-                self._prepare_source(source, pause_threshold=1.1)
-                audio = self._recognizer.listen(source, phrase_time_limit=5)
-            return self._normalize(self._recognizer.recognize_google(audio, language="en-us"))
-        except Exception:
-            return ""
+        return self._capture(timeout=None, phrase_time_limit=5, pause_threshold=1.1)
 
     def listen_for_command(self, timeout: int = 7, phrase_time_limit: int = 8) -> str:
+        return self._capture(timeout=timeout, phrase_time_limit=min(phrase_time_limit, 7), pause_threshold=0.9)
+
+    def listen_for_interrupt(self) -> str:
+        return self._capture(timeout=0.8, phrase_time_limit=2, pause_threshold=0.45)
+
+    def _capture(self, timeout: int | None, phrase_time_limit: int, pause_threshold: float) -> str:
         if sr is None or self._recognizer is None:
             return ""
         try:
             with sr.Microphone() as source:
-                self._prepare_source(source, pause_threshold=0.9)
+                self._prepare_source(source, pause_threshold)
                 audio = self._recognizer.listen(
                     source,
                     timeout=timeout,
-                    phrase_time_limit=min(phrase_time_limit, 7),
-                )
-            return self._normalize(self._recognizer.recognize_google(audio, language="en-us"))
-        except Exception:
-            return ""
-
-    def listen_for_interrupt(self) -> str:
-        if sr is None or self._recognizer is None:
-            return ""
-        try:
-            with sr.Microphone() as source:
-                self._prepare_source(source, pause_threshold=0.45)
-                audio = self._recognizer.listen(
-                    source,
-                    timeout=0.8,
-                    phrase_time_limit=2,
+                    phrase_time_limit=phrase_time_limit,
                 )
             return self._normalize(self._recognizer.recognize_google(audio, language="en-us"))
         except Exception:
