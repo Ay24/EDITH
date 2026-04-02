@@ -89,6 +89,12 @@ class AppConfig:
             str(Path("data") / "edith_telemetry.jsonl"),
         )
     )
+    self_improve_overrides_path: str = field(
+        default_factory=lambda: os.getenv(
+            "EDITH_SELF_IMPROVE_OVERRIDES_PATH",
+            str(Path("data") / "edith_self_improve_overrides.json"),
+        )
+    )
     contacts: dict[str, str] = field(
         default_factory=lambda: {
             "primary_contact": "+10000000001",
@@ -104,3 +110,24 @@ class AppConfig:
             "secondary_contact": "Secondary Contact",
         }
     )
+
+    def __post_init__(self) -> None:
+        self._apply_runtime_overrides()
+
+    def _apply_runtime_overrides(self) -> None:
+        path = Path(self.self_improve_overrides_path)
+        if not path.exists():
+            return
+        try:
+            import json
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        if not isinstance(data, dict):
+            return
+        timeout = data.get("command_timeout_seconds")
+        if isinstance(timeout, int) and 10 <= timeout <= 120:
+            self.command_timeout_seconds = timeout
+        threshold = data.get("voice_confidence_threshold")
+        if isinstance(threshold, (int, float)) and 0.2 <= float(threshold) <= 0.9:
+            self.voice_confidence_threshold = float(threshold)

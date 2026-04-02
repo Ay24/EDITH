@@ -23,6 +23,7 @@ from edith_app.services.knowledge_service import KnowledgeService
 from edith_app.services.media_service import MediaService
 from edith_app.services.memory_service import MemoryService
 from edith_app.services.notes_service import NotesService
+from edith_app.services.self_improve_service import SelfImproveService
 from edith_app.services.system_service import SystemService
 from edith_app.services.vision_service import VisionService
 from edith_app.services.voice_service import VoiceService
@@ -51,6 +52,12 @@ class EdithAssistant:
         self.session_memory = SessionMemory(config.session_memory_path)
         self.task_queue = TaskQueue(config.cowork_tasks_path)
         self.notes = NotesService(config.notes_path)
+        self.self_improve = SelfImproveService(
+            project_root=str(config.project_root),
+            telemetry_path=config.telemetry_path,
+            overrides_path=config.self_improve_overrides_path,
+            agent=self.agent,
+        )
         self.vision = VisionService(config)
         self.system = SystemService(self.vision, config.organization_manifest_path)
         self.whatsapp = WhatsAppService()
@@ -239,6 +246,20 @@ class EdithAssistant:
             result = CommandResult(self.media.open_site("https://mail.google.com/", "Gmail"), action="browser")
         elif lowered.startswith("open whatsapp"):
             result = CommandResult(self.whatsapp.open_app(), action="system")
+        elif lowered in {"self improve status", "self-improve status", "improve status"}:
+            result = CommandResult(self.self_improve.status_report(), action="status")
+        elif lowered in {"self improve apply", "self-improve apply"}:
+            run_goal = "improve runtime speed, stability, and voice reliability with safe local tuning"
+            result = CommandResult(self.self_improve.run(run_goal, self._context_history(), apply=True), action="status")
+        elif lowered.startswith("propose skill for "):
+            goal = command[len("propose skill for "):].strip()
+            result = CommandResult(self.self_improve.propose_skill(goal, self._context_history()), action="status")
+        elif lowered.startswith("self improve ") or lowered.startswith("self-improve "):
+            run_goal = re.sub(r"^self[\s-]?improve\s+", "", command, flags=re.IGNORECASE).strip()
+            result = CommandResult(self.self_improve.run(run_goal or "improve runtime reliability", self._context_history(), apply=False), action="status")
+        elif lowered in {"self improve", "self-improve"}:
+            run_goal = "improve runtime speed, stability, and voice reliability with safe local tuning"
+            result = CommandResult(self.self_improve.run(run_goal, self._context_history(), apply=False), action="status")
         elif lowered in {"run preflight", "preflight", "system preflight"}:
             result = CommandResult(self.preflight_report(), action="status")
         elif lowered in {"export debug bundle", "export diagnostics", "debug bundle"}:
@@ -604,7 +625,8 @@ class EdithAssistant:
             "problems with you, launch YouTube and Spotify automations, open common Windows tools, search files and "
             "folders, organize desktops and folders, move files into place, control Wi-Fi and brightness, check for "
             "updates, search Google, summarize Wikipedia, adjust system volume, analyze the workspace like a coding "
-            "teammate, inspect files, run compile checks, and keep session-level coworker memory."
+            "teammate, inspect files, run compile checks, keep session-level coworker memory, and run a safe "
+            "self-improvement cycle that tunes runtime reliability without retraining models."
         )
 
     def _strip_words(self, text: str, words: list[str]) -> str:

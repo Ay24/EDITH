@@ -256,6 +256,8 @@ class EdithDesktopUI:
             ("Think With Me", "think with me about building a personal AI system"),
             ("Cowork Mode", "cowork on improving the startup performance of this project"),
             ("Analyze Workspace", "analyze workspace for bottlenecks"),
+            ("Self Improve", "self improve"),
+            ("Apply Improve", "self improve apply"),
             ("Run Preflight", "run preflight"),
             ("Export Debug", "export debug bundle"),
             ("Coding Task", "coding task improve the startup flow and verify the result"),
@@ -339,6 +341,10 @@ class EdithDesktopUI:
                 "cowork on fixing the startup bottleneck\n"
                 "analyze workspace for voice issues\n"
                 "browser task compare local voice engines for Windows\n"
+                "self improve status\n"
+                "self improve\n"
+                "self improve apply\n"
+                "propose skill for smart browser automation\n"
                 "analyze desktop\n"
                 "analyze desktop by context\n"
                 "preview organize desktop by context\n"
