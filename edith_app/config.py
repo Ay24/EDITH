@@ -33,6 +33,8 @@ class AppConfig:
     ollama_models_path: str = field(default_factory=lambda: os.getenv("OLLAMA_MODELS", ""))
     wake_word: str = field(default_factory=lambda: os.getenv("EDITH_WAKE_WORD", "edith"))
     voice_command_timeout: int = field(default_factory=lambda: int(os.getenv("EDITH_VOICE_TIMEOUT", "6")))
+    command_timeout_seconds: int = field(default_factory=lambda: int(os.getenv("EDITH_COMMAND_TIMEOUT", "35")))
+    voice_confidence_threshold: float = field(default_factory=lambda: float(os.getenv("EDITH_VOICE_CONFIDENCE_THRESHOLD", "0.45")))
     auto_listen: bool = field(default_factory=lambda: os.getenv("EDITH_AUTO_LISTEN", "1") != "0")
     require_wake_word: bool = field(default_factory=lambda: os.getenv("EDITH_REQUIRE_WAKE_WORD", "0") == "1")
     lightweight_mode: bool = field(default_factory=lambda: os.getenv("EDITH_LIGHTWEIGHT_MODE", "1") != "0")
@@ -79,6 +81,12 @@ class AppConfig:
         default_factory=lambda: os.getenv(
             "EDITH_ORGANIZATION_MANIFEST_PATH",
             str(Path("data") / "edith_last_organization.json"),
+        )
+    )
+    telemetry_path: str = field(
+        default_factory=lambda: os.getenv(
+            "EDITH_TELEMETRY_PATH",
+            str(Path("data") / "edith_telemetry.jsonl"),
         )
     )
     contacts: dict[str, str] = field(

@@ -56,6 +56,8 @@ class SystemService:
             "calculator": "calc.exe", "calc": "calc.exe", "notepad": "notepad.exe", "paint": "mspaint.exe",
             "cmd": "cmd.exe", "powershell": "powershell.exe", "explorer": "explorer.exe", "file explorer": "explorer.exe",
             "settings": "start ms-settings:", "task manager": "taskmgr.exe", "control panel": "control.exe", "whatsapp": "start whatsapp:",
+            "chrome": "chrome.exe", "google chrome": "chrome.exe", "microsoft edge": "msedge.exe", "edge": "msedge.exe",
+            "firefox": "firefox.exe",
         }
         self._known_sites = {
             "notebooklm": "https://notebooklm.google.com/", "chatgpt": "https://chatgpt.com/", "github": "https://github.com/",

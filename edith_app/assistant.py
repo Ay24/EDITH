@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import urllib.parse
 import webbrowser
+import zipfile
 from datetime import datetime
+from pathlib import Path
+from typing import Any
 
 from edith_app.core.agent_loop import AgentLoop
 from edith_app.core.session_memory import SessionMemory
@@ -57,6 +61,7 @@ class EdithAssistant:
         )
         self._pending_suggestion: str | None = None
         self._pending_message_contact: str | None = None
+        self._pending_organization: tuple[str, bool] | None = None
         self._suggestion_cooldown_turns = 0
 
     def snapshot(self) -> AssistantSnapshot:
@@ -103,10 +108,24 @@ class EdithAssistant:
             self._pending_suggestion = None
             return self.handle(replay_command)
 
+        if lowered in {"yes", "yes do it", "do it", "go ahead", "apply", "confirm"} and self._pending_organization:
+            target, by_context = self._pending_organization
+            self._pending_organization = None
+            reply = self.system.organize_folder_by_context(target) if by_context else self.system.organize_folder(target)
+            result = CommandResult(reply, action="files")
+            self._remember("assistant", result.reply)
+            return result
+
         if lowered in {"no", "nope", "cancel", "not that"} and self._pending_suggestion:
             self._pending_suggestion = None
             self._suggestion_cooldown_turns = 2
             result = CommandResult("Understood. Tell me what you want instead.", action="memory")
+            self._remember("assistant", result.reply)
+            return result
+
+        if lowered in {"no", "nope", "cancel", "not that"} and self._pending_organization:
+            self._pending_organization = None
+            result = CommandResult("Okay, I cancelled that organization run.", action="files")
             self._remember("assistant", result.reply)
             return result
 
@@ -124,6 +143,13 @@ class EdithAssistant:
             contact = self._pending_message_contact
             self._pending_message_contact = None
             return self._finalize_pending_message(contact, command)
+
+        compound_reply = self._try_handle_compound_command(command)
+        if compound_reply is not None:
+            result = CommandResult(compound_reply, action="routine")
+            result.reply = self._polish_reply(result.reply, result.action)
+            self._remember("assistant", result.reply)
+            return result
 
         if not command:
             result = CommandResult("I need a command to work with.")
@@ -213,6 +239,10 @@ class EdithAssistant:
             result = CommandResult(self.media.open_site("https://mail.google.com/", "Gmail"), action="browser")
         elif lowered.startswith("open whatsapp"):
             result = CommandResult(self.whatsapp.open_app(), action="system")
+        elif lowered in {"run preflight", "preflight", "system preflight"}:
+            result = CommandResult(self.preflight_report(), action="status")
+        elif lowered in {"export debug bundle", "export diagnostics", "debug bundle"}:
+            result = CommandResult(self.export_debug_bundle(), action="status")
         elif self._is_whatsapp_call_command(lowered):
             result = CommandResult(self._start_whatsapp_call(command, video=False), action="message")
         elif self._is_whatsapp_video_call_command(lowered):
@@ -237,10 +267,7 @@ class EdithAssistant:
                 result = CommandResult(self.system.folder_clutter_report(target), action="files")
         elif self._is_organize_target_command(command):
             target, by_context = self._parse_organize_target_command(command)
-            if by_context:
-                result = CommandResult(self.system.organize_folder_by_context(target), action="files")
-            else:
-                result = CommandResult(self.system.organize_folder(target), action="files")
+            result = CommandResult(self._queue_organization(target, by_context=by_context), action="files")
         elif lowered in {"analyze desktop", "analyze my desktop", "desktop analysis", "desktop status"}:
             result = CommandResult(self.system.folder_clutter_report("desktop"), action="files")
         elif lowered in {"analyze downloads", "downloads analysis", "analyze my downloads"}:
@@ -258,13 +285,13 @@ class EdithAssistant:
         elif lowered in {"preview organize downloads by context", "preview downloads context organization"}:
             result = CommandResult(self.system.preview_organization("downloads", by_context=True), action="files")
         elif lowered in {"organize desktop", "clean desktop", "declutter desktop", "sort desktop files"}:
-            result = CommandResult(self.system.organize_folder("desktop"), action="files")
+            result = CommandResult(self._queue_organization("desktop", by_context=False), action="files")
         elif lowered in {"organize downloads", "clean downloads", "declutter downloads"}:
-            result = CommandResult(self.system.organize_folder("downloads"), action="files")
+            result = CommandResult(self._queue_organization("downloads", by_context=False), action="files")
         elif lowered in {"organize desktop by context", "context organize desktop", "smart organize desktop"}:
-            result = CommandResult(self.system.organize_folder_by_context("desktop"), action="files")
+            result = CommandResult(self._queue_organization("desktop", by_context=True), action="files")
         elif lowered in {"organize downloads by context", "context organize downloads", "smart organize downloads"}:
-            result = CommandResult(self.system.organize_folder_by_context("downloads"), action="files")
+            result = CommandResult(self._queue_organization("downloads", by_context=True), action="files")
         elif lowered in {"undo last organization", "undo organization", "revert last organization"}:
             result = CommandResult(self.system.undo_last_organization(), action="files")
         elif lowered.startswith("analyze folder "):
@@ -284,13 +311,13 @@ class EdithAssistant:
             result = CommandResult(self.system.preview_organization(target, by_context=False), action="files")
         elif lowered.startswith("organize folder "):
             target = command[len("organize folder "):].strip()
-            result = CommandResult(self.system.organize_folder(target), action="files")
+            result = CommandResult(self._queue_organization(target, by_context=False), action="files")
         elif lowered.startswith("organize folder by context "):
             target = command[len("organize folder by context "):].strip()
-            result = CommandResult(self.system.organize_folder_by_context(target), action="files")
+            result = CommandResult(self._queue_organization(target, by_context=True), action="files")
         elif lowered.startswith("smart organize folder "):
             target = command[len("smart organize folder "):].strip()
-            result = CommandResult(self.system.organize_folder_by_context(target), action="files")
+            result = CommandResult(self._queue_organization(target, by_context=True), action="files")
         elif self._is_move_item_command(command):
             item_name, folder_name = self._parse_move_item_command(command)
             result = CommandResult(self.system.move_item(item_name, folder_name), action="files")
@@ -426,8 +453,14 @@ class EdithAssistant:
                     )
                     self._remember("assistant", result.reply)
                     return result
-            entities = self.knowledge.extract_entities(command)
-            reply = self.agent.reply(self._contextualize_prompt(command), self._context_history())
+            smalltalk = self._smalltalk_reply(command)
+            if smalltalk is not None:
+                result = CommandResult(reply=smalltalk, action="agent")
+                result.reply = self._polish_reply(result.reply, result.action)
+                self._remember("assistant", result.reply)
+                return result
+            entities = self._safe_extract_entities(command)
+            reply = self._safe_agent_reply(command)
             metadata = {"entities": ", ".join(entities)} if entities else {}
             result = CommandResult(reply=reply, action="agent", metadata=metadata)
 
@@ -438,6 +471,128 @@ class EdithAssistant:
         if self._suggestion_cooldown_turns > 0:
             self._suggestion_cooldown_turns -= 1
         return result
+
+    def _safe_extract_entities(self, command: str) -> list[str]:
+        try:
+            return self.knowledge.extract_entities(command)
+        except Exception:
+            return []
+
+    def _safe_agent_reply(self, command: str) -> str:
+        try:
+            return self.agent.reply(self._contextualize_prompt(command), self._context_history())
+        except Exception:
+            return "I hit a temporary model issue, but I am still here. Please try that once more."
+
+    def _smalltalk_reply(self, command: str) -> str | None:
+        lowered = command.lower().strip()
+        normalized = re.sub(r"[^a-z0-9\s]", " ", lowered)
+        normalized = " ".join(normalized.split())
+        smalltalk_map = {
+            "hi": "Hey. I am here with you.",
+            "hello": "Hello. Ready when you are.",
+            "hey": "Hey. What should we do next?",
+            "how are you": "I am doing great and ready to help.",
+            "good morning": "Good morning. Let's make this a productive run.",
+            "good afternoon": "Good afternoon. I am ready to help.",
+            "good evening": "Good evening. What should I handle first?",
+            "thanks": "Always. Want me to do the next step too?",
+            "thank you": "Anytime. I can keep going.",
+        }
+        if normalized in smalltalk_map:
+            return smalltalk_map[normalized]
+        if normalized.startswith("hi ") or normalized.startswith("hello ") or normalized.startswith("hey "):
+            return "Hey. I am listening."
+        return None
+
+    def _try_handle_compound_command(self, command: str) -> str | None:
+        lowered = command.lower().strip()
+        if len(lowered) < 12:
+            return None
+        if " and " not in lowered and " then " not in lowered:
+            return None
+        action_markers = ("open ", "search ", "search for ", "play ", "go to ")
+        if sum(1 for marker in action_markers if marker in lowered) < 2:
+            return None
+
+        parts = re.split(r"\s+(?:and then|then|and)\s+", command, flags=re.IGNORECASE)
+        parts = [part.strip(" ,.") for part in parts if part.strip(" ,.")]
+        if len(parts) < 2:
+            return None
+
+        context: dict[str, Any] = {"site": None}
+        replies: list[str] = []
+        handled_steps = 0
+        for part in parts[:5]:
+            step_reply = self._execute_compound_step(part, context)
+            if step_reply is None:
+                continue
+            handled_steps += 1
+            replies.append(step_reply)
+        if handled_steps < 2:
+            return None
+        return " ".join(replies)
+
+    def _execute_compound_step(self, step: str, context: dict[str, Any]) -> str | None:
+        lowered = step.lower().strip()
+        if lowered.startswith("open "):
+            target = step[5:].strip()
+            if not target:
+                return None
+            context["site"] = self._infer_site(target)
+            return self.system.open_target(target)
+        if lowered.startswith("go to "):
+            target = step[6:].strip()
+            if not target:
+                return None
+            context["site"] = self._infer_site(target)
+            return self.system.open_target(target)
+        if lowered.startswith("play "):
+            query = re.sub(r"^play\s+", "", step, flags=re.IGNORECASE).strip()
+            if "on youtube" in lowered:
+                context["site"] = "youtube"
+                query = re.sub(r"\s+on youtube$", "", query, flags=re.IGNORECASE).strip()
+                return self.media.search_youtube(query or "music")
+            if "on spotify" in lowered:
+                context["site"] = "spotify"
+                query = re.sub(r"\s+on spotify$", "", query, flags=re.IGNORECASE).strip()
+                return self.media.play_spotify(query or "music")
+            active = context.get("site")
+            if active == "youtube":
+                return self.media.search_youtube(query or "music")
+            if active == "spotify":
+                return self.media.play_spotify(query or "music")
+            return self.media.search_youtube(query or "music")
+        if lowered.startswith("search for ") or lowered.startswith("search "):
+            query = re.sub(r"^search(?:\s+for)?\s+", "", step, flags=re.IGNORECASE).strip()
+            if not query:
+                return None
+            active = context.get("site")
+            if "youtube" in lowered or active == "youtube":
+                context["site"] = "youtube"
+                return self.media.search_youtube(query)
+            if "spotify" in lowered or active == "spotify":
+                context["site"] = "spotify"
+                return self.media.search_spotify(query)
+            if "amazon" in lowered or active == "amazon":
+                context["site"] = "amazon"
+                encoded = urllib.parse.quote_plus(query)
+                webbrowser.open(f"https://www.amazon.in/s?k={encoded}")
+                return f"Searching Amazon for {query}."
+            return self._search_files_or_web(query)
+        return None
+
+    def _infer_site(self, target: str) -> str | None:
+        lowered = target.lower().strip()
+        if "youtube" in lowered:
+            return "youtube"
+        if "spotify" in lowered:
+            return "spotify"
+        if "amazon" in lowered:
+            return "amazon"
+        if lowered in {"chrome", "google chrome"}:
+            return "browser"
+        return None
 
     def _remember(self, source: str, text: str) -> None:
         self.history.append(ChatMessage(source=source, text=text))
@@ -640,6 +795,79 @@ class EdithAssistant:
             remembered_messages.append(ChatMessage(source="assistant", text=f"Remembered user request: {item.command}"))
             remembered_messages.append(ChatMessage(source="assistant", text=f"Remembered reply: {item.reply}"))
         return (remembered_messages + history)[-14:]
+
+    def _queue_organization(self, target: str, by_context: bool) -> str:
+        preview = self.system.preview_organization(target, by_context=by_context)
+        self._pending_organization = (target, by_context)
+        mode = "context" if by_context else "file-type"
+        return (
+            f"{preview}\n\n"
+            f"Preview ready ({mode}). Say 'yes' to apply this organization, or 'no' to cancel."
+        )
+
+    def preflight_report(self) -> str:
+        model_ready, model_status = self.agent.runtime_status()
+        voice_ready = self.voice.enabled
+        audio_ready = self.audio.system_audio_enabled
+        online = self.connectivity.is_online()
+        return (
+            "Preflight status:\n"
+            f"- Model runtime: {'READY' if model_ready else 'DEGRADED'} ({model_status})\n"
+            f"- Voice recognition: {'READY' if voice_ready else 'UNAVAILABLE'}\n"
+            f"- System audio control: {'READY' if audio_ready else 'LIMITED'}\n"
+            f"- Internet: {'ONLINE' if online else 'OFFLINE'}\n"
+            f"- Command timeout: {self.config.command_timeout_seconds}s"
+        )
+
+    def export_debug_bundle(self) -> str:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        root = Path(self.config.data_dir)
+        bundle_dir = root / "debug"
+        bundle_dir.mkdir(parents=True, exist_ok=True)
+        bundle_path = bundle_dir / f"edith_debug_{timestamp}.zip"
+
+        snapshot = {
+            "timestamp": timestamp,
+            "model_status": self.agent.runtime_status()[1],
+            "voice_enabled": self.voice.enabled,
+            "audio_enabled": self.audio.system_audio_enabled,
+            "online": self.connectivity.is_online(),
+            "models": {
+                "main": self.config.ollama_model,
+                "planner": self.config.planner_model,
+                "creative": self.config.creative_model,
+                "fast": self.config.fast_model,
+            },
+            "recent_history": [
+                {"source": item.source, "text": item.text, "timestamp": item.timestamp.isoformat()}
+                for item in self.history[-20:]
+            ],
+        }
+
+        snapshot_path = root / f"debug_snapshot_{timestamp}.json"
+        snapshot_path.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
+
+        include_paths = [
+            snapshot_path,
+            Path(self.config.memory_path),
+            Path(self.config.session_memory_path),
+            Path(self.config.notes_path),
+            Path(self.config.telemetry_path),
+        ]
+        try:
+            with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_DEFLATED) as zipf:
+                for path in include_paths:
+                    if path.exists() and path.is_file():
+                        zipf.write(path, arcname=path.name)
+            return f"Debug bundle exported to {bundle_path}."
+        except Exception as exc:
+            return f"I couldn't export the debug bundle: {exc}"
+        finally:
+            try:
+                if snapshot_path.exists():
+                    snapshot_path.unlink()
+            except Exception:
+                pass
 
     def _handle_bluetooth_command(self, lowered: str) -> str:
         if lowered in {"bluetooth off", "turn off bluetooth", "disable bluetooth"}:

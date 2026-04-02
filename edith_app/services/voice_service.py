@@ -21,6 +21,7 @@ class VoiceService:
     def __init__(self, config: AppConfig) -> None:
         self._recognizer = sr.Recognizer() if sr is not None else None
         self._ambient_calibrated = False
+        self._capture_count = 0
         self._prefer_offline = config.prefer_offline_voice
         self._vosk_model = self._load_vosk_model(config.vosk_model_path)
         if self._recognizer is not None:
@@ -53,16 +54,48 @@ class VoiceService:
                     timeout=timeout,
                     phrase_time_limit=phrase_time_limit,
                 )
+            self._capture_count += 1
             return self._normalize(self._recognize(audio))
         except Exception:
+            self._recover_recognizer_state()
             return ""
 
     def _prepare_source(self, source: object, pause_threshold: float) -> None:
         self._recognizer.pause_threshold = pause_threshold
         self._recognizer.non_speaking_duration = 0.35
-        if not self._ambient_calibrated:
+        should_recalibrate = (self._capture_count % 24 == 0 and self._capture_count > 0)
+        if not self._ambient_calibrated or should_recalibrate:
             self._recognizer.adjust_for_ambient_noise(source, duration=0.2)
             self._ambient_calibrated = True
+
+    def estimate_confidence(self, text: str) -> float:
+        cleaned = " ".join(text.strip().split()).lower()
+        if not cleaned:
+            return 0.0
+        words = cleaned.split()
+        if len(words) == 1 and len(words[0]) <= 2:
+            return 0.15
+        filler = {"uh", "um", "hmm", "ah", "er"}
+        filler_hits = sum(1 for word in words if word in filler)
+        confidence = 0.55
+        confidence += min(0.25, len(words) * 0.04)
+        confidence -= min(0.25, filler_hits * 0.08)
+        if cleaned.endswith(("to", "for", "and", "then", "the", "a", "an")):
+            confidence -= 0.2
+        return max(0.0, min(1.0, confidence))
+
+    def _recover_recognizer_state(self) -> None:
+        if sr is None:
+            return
+        try:
+            self._recognizer = sr.Recognizer()
+            self._recognizer.dynamic_energy_threshold = True
+            self._recognizer.energy_threshold = 250
+            self._recognizer.pause_threshold = 1.0
+            self._recognizer.non_speaking_duration = 0.35
+            self._ambient_calibrated = False
+        except Exception:
+            pass
 
     def _recognize(self, audio: object) -> str:
         if self._prefer_offline and self._vosk_model is not None:

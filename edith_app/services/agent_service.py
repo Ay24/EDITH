@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import shutil
 import subprocess
 import threading
@@ -24,6 +25,13 @@ class AgentService:
     @property
     def enabled(self) -> bool:
         return self._model_available(self._config.ollama_model)
+
+    def runtime_status(self) -> tuple[bool, str]:
+        if not self._server_ready():
+            return False, "Ollama server offline"
+        if not self._model_available(self._config.ollama_model):
+            return False, f"Model {self._config.ollama_model} not loaded"
+        return True, f"Model {self._config.ollama_model} ready"
 
     def reply(self, prompt: str, history: Iterable[ChatMessage]) -> str:
         return self._run_model(
@@ -122,7 +130,14 @@ class AgentService:
                     self._recover_async(model)
                     return f"The local model '{model}' is still warming up or hit an internal Ollama error. Give it a moment and try again."
                 response.raise_for_status()
-                data = response.json()
+                try:
+                    data = response.json()
+                except json.JSONDecodeError:
+                    if attempt == 0:
+                        time.sleep(0.8)
+                        continue
+                    self._recover_async(model)
+                    return f"The local model '{model}' returned an invalid response while warming up. Try again in a moment."
                 return data.get("response", "").strip() or "The local model returned an empty response."
             except requests.RequestException:
                 if attempt == 0:
@@ -130,6 +145,12 @@ class AgentService:
                     continue
                 self._recover_async(model)
                 return f"I couldn't reach the local model '{model}' just now. Edith is still trying to bring Ollama online."
+            except Exception:
+                if attempt == 0:
+                    time.sleep(0.6)
+                    continue
+                self._recover_async(model)
+                return f"I hit a local model runtime issue for '{model}', but I am recovering it in the background."
         self._recover_async(model)
         return f"The local model '{model}' is still warming up. Try again in a moment."
 

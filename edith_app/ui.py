@@ -1,10 +1,13 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
+import json
 import queue
 import threading
 import time
 import tkinter as tk
+from datetime import datetime
 from math import sin
+from pathlib import Path
 from tkinter import ttk
 
 from edith_app.assistant import EdithAssistant
@@ -38,10 +41,12 @@ class EdithDesktopUI:
 
         self.input_var = tk.StringVar()
         self.status_var = tk.StringVar()
+        self.health_var = tk.StringVar(value="Runtime health loading...")
         self.mode_var = tk.StringVar()
         self.quick_var = tk.StringVar(value="Try: cowork on improving startup performance")
         self.entity_var = tk.StringVar(value="Detected entities and cowork insights will appear here.")
         self.cowork_var = tk.StringVar(value="Cowork queue and edit proposals will appear here.")
+        self.preflight_var = tk.StringVar(value="Run preflight to verify model, voice, and runtime readiness.")
         self.voice_var = tk.StringVar(value="Voice mode offline")
         self.chat_log: tk.Text | None = None
         self.command_entry: tk.Entry | None = None
@@ -65,6 +70,12 @@ class EdithDesktopUI:
         self.command_history: list[str] = []
         self.command_history_index: int = -1
         self._deferred_command: str | None = None
+        self._request_seq = 0
+        self._active_request_id: int | None = None
+        self._timed_out_requests: set[int] = set()
+        self._pending_voice_command: str | None = None
+        self._pending_voice_confidence: float | None = None
+        self._telemetry_path = Path(self.assistant.config.telemetry_path)
 
         self._build_theme()
         self._build_layout()
@@ -216,9 +227,11 @@ class EdithDesktopUI:
         footer.columnconfigure(0, weight=1)
         footer.columnconfigure(1, weight=1)
         footer.columnconfigure(2, weight=1)
+        footer.rowconfigure(1, weight=0)
         ttk.Label(footer, textvariable=self.mode_var, style="Status.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Label(footer, textvariable=self.status_var, style="Status.TLabel").grid(row=0, column=1, sticky="w")
         ttk.Label(footer, textvariable=self.voice_var, style="Status.TLabel").grid(row=0, column=2, sticky="e")
+        ttk.Label(footer, textvariable=self.health_var, style="Status.TLabel").grid(row=1, column=0, columnspan=3, sticky="w", pady=(8, 0))
 
     def _build_sidebar(self, sidebar: ttk.Frame) -> None:
         intro = ttk.Frame(sidebar, style="Hero.TFrame", padding=16)
@@ -243,6 +256,8 @@ class EdithDesktopUI:
             ("Think With Me", "think with me about building a personal AI system"),
             ("Cowork Mode", "cowork on improving the startup performance of this project"),
             ("Analyze Workspace", "analyze workspace for bottlenecks"),
+            ("Run Preflight", "run preflight"),
+            ("Export Debug", "export debug bundle"),
             ("Coding Task", "coding task improve the startup flow and verify the result"),
             ("Show Tasks", "show tasks"),
             ("Analyze Desktop", "analyze desktop"),
@@ -274,20 +289,26 @@ class EdithDesktopUI:
             row=1, column=0, sticky="w", pady=(8, 0)
         )
 
+        preflight = ttk.Frame(parent, style="Card.TFrame", padding=14)
+        preflight.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        preflight.columnconfigure(0, weight=1)
+        ttk.Label(preflight, text="Preflight", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(preflight, textvariable=self.preflight_var, style="CardBody.TLabel").grid(row=1, column=0, sticky="w", pady=(8, 0))
+
         quick = ttk.Frame(parent, style="Card.TFrame", padding=14)
-        quick.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        quick.grid(row=2, column=0, sticky="ew", pady=(10, 0))
         quick.columnconfigure(0, weight=1)
         ttk.Label(quick, text="Quick Prompt", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Label(quick, textvariable=self.quick_var, style="CardBody.TLabel").grid(row=1, column=0, sticky="w", pady=(8, 0))
 
         nlp = ttk.Frame(parent, style="Card.TFrame", padding=14)
-        nlp.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        nlp.grid(row=3, column=0, sticky="ew", pady=(10, 0))
         nlp.columnconfigure(0, weight=1)
         ttk.Label(nlp, text="NLP Signals", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Label(nlp, textvariable=self.entity_var, style="CardBody.TLabel").grid(row=1, column=0, sticky="w", pady=(8, 0))
 
         voice = ttk.Frame(parent, style="Card.TFrame", padding=14)
-        voice.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        voice.grid(row=4, column=0, sticky="ew", pady=(10, 0))
         voice.columnconfigure(1, weight=1)
         ttk.Label(voice, text="Voice Presence", style="CardTitle.TLabel").grid(row=0, column=0, columnspan=2, sticky="w")
         self.voice_canvas = tk.Canvas(
@@ -305,7 +326,7 @@ class EdithDesktopUI:
         ttk.Label(voice, textvariable=self.loading_var, style="CardBody.TLabel").grid(row=2, column=1, sticky="nw", pady=(8, 0))
 
         ideas = ttk.Frame(parent, style="Card.TFrame", padding=14)
-        ideas.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+        ideas.grid(row=5, column=0, sticky="ew", pady=(10, 0))
         ideas.columnconfigure(0, weight=1)
         ttk.Label(ideas, text="Suggested Commands", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Label(
@@ -338,7 +359,7 @@ class EdithDesktopUI:
         ).grid(row=1, column=0, sticky="w", pady=(8, 0))
 
         cowork = ttk.Frame(parent, style="Card.TFrame", padding=14)
-        cowork.grid(row=5, column=0, sticky="ew", pady=(10, 0))
+        cowork.grid(row=6, column=0, sticky="ew", pady=(10, 0))
         cowork.columnconfigure(0, weight=1)
         ttk.Label(cowork, text="Cowork Queue", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Label(cowork, textvariable=self.cowork_var, style="CardBody.TLabel").grid(row=1, column=0, sticky="w", pady=(8, 0))
@@ -362,6 +383,9 @@ class EdithDesktopUI:
             self._append("system", "Voice mode is configured for direct commands. You can simply speak and I will act.")
         self._append("system", "You can ask me to plan, brainstorm, cowork on tasks, inspect this workspace, search files, control apps, and run desktop routines.")
         self.cowork_var.set(self.assistant.task_queue.summary())
+        self.preflight_var.set(self.assistant.preflight_report())
+        model_ready, detail = self.assistant.agent.runtime_status()
+        self.health_var.set(f"Runtime health: {'READY' if model_ready else 'DEGRADED'} ({detail})")
         if self.chat_log is not None:
             self.chat_log.tag_configure("system", foreground=self._colors["accent_soft"])
             self.chat_log.tag_configure("user", foreground=self._colors["text"])
@@ -369,6 +393,7 @@ class EdithDesktopUI:
             self.chat_log.tag_configure("error", foreground=self._colors["error"])
             self.chat_log.tag_configure("label", foreground=self._colors["muted"], font=("Segoe UI Semibold", 9))
         self.root.after(200, self._focus_command_entry)
+        self.root.after(1200, self._refresh_runtime_health)
         if self.assistant.config.auto_listen:
             self.root.after(400, self._toggle_wake_mode)
 
@@ -418,16 +443,48 @@ class EdithDesktopUI:
         self._append("user", command)
         self.processing = True
         self._set_voice_state("processing")
+        self._request_seq += 1
+        request_id = self._request_seq
+        self._active_request_id = request_id
+        started_at = time.monotonic()
+        worker = threading.Thread(
+            target=self._run_command_worker,
+            args=(request_id, command, started_at),
+            daemon=True,
+        )
+        worker.start()
+        self.root.after(
+            max(1000, int(self.assistant.config.command_timeout_seconds * 1000)),
+            lambda rid=request_id, cmd=command, started=started_at: self._on_command_timeout(rid, cmd, started),
+        )
 
+    def _run_command_worker(self, request_id: int, command: str, started_at: float) -> None:
         try:
             result = self.assistant.handle(command)
+            self.voice_queue.put(("command_result", (request_id, command, started_at, result, None)))
         except Exception as exc:
-            self.processing = False
-            self._set_voice_state("idle")
-            self._append("error", str(exc))
-            self._run_deferred_command()
-            return
+            self.voice_queue.put(("command_result", (request_id, command, started_at, None, str(exc))))
 
+    def _on_command_timeout(self, request_id: int, command: str, started_at: float) -> None:
+        if self._active_request_id != request_id or not self.processing:
+            return
+        self._timed_out_requests.add(request_id)
+        self.processing = False
+        self._set_voice_state("idle")
+        self.health_var.set("Runtime health: DEGRADED (command timeout - safe mode active)")
+        self._append(
+            "error",
+            "Command timed out. I kept the session alive in safe mode. You can continue with local/system commands.",
+        )
+        self._log_command_metric(
+            command=command,
+            status="timeout",
+            latency_ms=int((time.monotonic() - started_at) * 1000),
+            error="command timeout",
+        )
+        self._run_deferred_command()
+
+    def _apply_command_result(self, result) -> None:
         entities = result.metadata.get("entities")
         plan = result.metadata.get("plan")
         verified = result.metadata.get("verified")
@@ -451,10 +508,8 @@ class EdithDesktopUI:
             self.cowork_var.set((queue_summary + ("\n\n" + "\n".join(panels) if panels else "")).strip())
         self._append("assistant", result.reply)
         self.assistant.speak(result.reply)
-        self.processing = False
         self._set_voice_state("speaking")
         self._focus_command_entry()
-        self.root.after(50, self._run_deferred_command)
 
     def _toggle_wake_mode(self) -> None:
         if self.voice_enabled:
@@ -536,8 +591,32 @@ class EdithDesktopUI:
             try:
                 kind, payload = self.voice_queue.get()
                 if kind == "voice_command":
+                    spoken = str(payload).strip()
+                    if self._pending_voice_command:
+                        if self._is_affirmative(spoken):
+                            confirmed = self._pending_voice_command
+                            self._pending_voice_command = None
+                            self._pending_voice_confidence = None
+                            self.voice_var.set("Voice: command confirmed")
+                            self.input_var.set(confirmed)
+                            self._submit()
+                            continue
+                        if self._is_negative(spoken):
+                            self._pending_voice_command = None
+                            self._pending_voice_confidence = None
+                            self._append("system", "Voice command cancelled.")
+                            continue
+                    confidence = self.assistant.voice.estimate_confidence(spoken)
+                    if confidence < self.assistant.config.voice_confidence_threshold:
+                        self._pending_voice_command = spoken
+                        self._pending_voice_confidence = confidence
+                        self._append(
+                            "system",
+                            f"Low confidence ({confidence:.2f}) for '{spoken}'. Say yes to run or no to cancel.",
+                        )
+                        continue
                     self.voice_var.set("Voice: command received")
-                    self.input_var.set(payload)
+                    self.input_var.set(spoken)
                     self._submit()
                     if self.voice_enabled:
                         if self.assistant.config.require_wake_word:
@@ -546,6 +625,26 @@ class EdithDesktopUI:
                             self.voice_var.set("Voice: continuous listening active")
                         if not self.assistant.audio.is_speaking and not self.processing:
                             self._set_voice_state("listening")
+                elif kind == "command_result":
+                    request_id, command, started_at, result, error = payload
+                    if request_id in self._timed_out_requests:
+                        self._timed_out_requests.discard(request_id)
+                        continue
+                    if self._active_request_id != request_id:
+                        continue
+                    self.processing = False
+                    self._active_request_id = None
+                    latency_ms = int((time.monotonic() - started_at) * 1000)
+                    if error:
+                        self._set_voice_state("idle")
+                        self._append("error", error)
+                        self.health_var.set("Runtime health: DEGRADED (last command failed)")
+                        self._log_command_metric(command=command, status="error", latency_ms=latency_ms, error=error)
+                    else:
+                        self._apply_command_result(result)
+                        self.health_var.set("Runtime health: READY")
+                        self._log_command_metric(command=command, status="ok", latency_ms=latency_ms)
+                    self.root.after(50, self._run_deferred_command)
                 elif kind == "voice_state":
                     self._queued_voice_state = payload
                     voice_text = {
@@ -713,6 +812,41 @@ class EdithDesktopUI:
         )
         canvas.itemconfigure(glow_item, fill=glow_color)
         canvas.itemconfigure(orb_item, fill=orb_color)
+
+    def _is_affirmative(self, text: str) -> bool:
+        lowered = text.lower().strip()
+        return lowered in {"yes", "yeah", "yep", "do it", "go ahead", "confirm"}
+
+    def _is_negative(self, text: str) -> bool:
+        lowered = text.lower().strip()
+        return lowered in {"no", "nope", "cancel", "stop", "not that"}
+
+    def _refresh_runtime_health(self) -> None:
+        try:
+            model_ready, detail = self.assistant.agent.runtime_status()
+            if model_ready:
+                self.health_var.set(f"Runtime health: READY ({detail})")
+            else:
+                self.health_var.set(f"Runtime health: DEGRADED ({detail})")
+        except Exception:
+            self.health_var.set("Runtime health: DEGRADED (health probe failed)")
+        self.root.after(2500, self._refresh_runtime_health)
+
+    def _log_command_metric(self, command: str, status: str, latency_ms: int, error: str = "") -> None:
+        try:
+            self._telemetry_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "timestamp": datetime.now().isoformat(),
+                "status": status,
+                "latency_ms": latency_ms,
+                "command": command,
+            }
+            if error:
+                payload["error"] = error
+            with self._telemetry_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload, ensure_ascii=True) + "\n")
+        except Exception:
+            pass
 
     def _shutdown(self) -> None:
         self.voice_enabled = False
