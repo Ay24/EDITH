@@ -1,0 +1,1 @@
+"""Edith desktop assistant package."""
