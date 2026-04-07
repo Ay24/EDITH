@@ -2,7 +2,7 @@ from __future__ import annotations
 
 try:
     import spacy
-except ImportError:
+except Exception:
     spacy = None
 
 try:

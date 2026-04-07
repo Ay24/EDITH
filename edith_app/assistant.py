@@ -518,6 +518,12 @@ class EdithAssistant:
                 result.reply = self._polish_reply(result.reply, result.action)
                 self._remember("assistant", result.reply)
                 return result
+            if self._should_try_model_intent(lowered):
+                intent_result = self._try_model_tool_intent(command)
+                if intent_result is not None:
+                    intent_result.reply = self._polish_reply(intent_result.reply, intent_result.action)
+                    self._remember("assistant", intent_result.reply)
+                    return intent_result
             entities = self._safe_extract_entities(command)
             reply = self._safe_agent_reply(command)
             metadata = {"entities": ", ".join(entities)} if entities else {}
@@ -552,6 +558,97 @@ class EdithAssistant:
         except Exception:
             self.logger.exception("safe agent reply failed")
             return "I hit a temporary model issue, but I am still here. Please try that once more."
+
+    def _try_model_tool_intent(self, command: str) -> CommandResult | None:
+        prompt = (
+            "Map the user request to one assistant action.\n"
+            "Return only JSON in this schema:\n"
+            '{"action":"...", "target":"", "query":"", "value":0, "by_context":false}\n'
+            "Allowed actions: open_target, web_search, youtube_play, spotify_play, find_file, "
+            "analyze_folder, organize_folder, set_volume, set_brightness, wifi_on, wifi_off, "
+            "bluetooth_on, bluetooth_off, focus_mode, cowork_mode, none.\n"
+            f"User request: {command}"
+        )
+        raw = self.agent.parse_intent(prompt, self._context_history())
+        parsed = self._extract_json_object(raw)
+        if parsed is None:
+            return None
+        action = str(parsed.get("action", "")).strip().lower()
+        target = str(parsed.get("target", "")).strip()
+        query = str(parsed.get("query", "")).strip()
+        by_context = bool(parsed.get("by_context", False))
+        value = parsed.get("value", None)
+
+        try:
+            if action == "open_target" and target:
+                return CommandResult(self.system.open_target(target), action="system")
+            if action == "web_search":
+                q = query or target
+                if q:
+                    return CommandResult(self._online_or_local(self.system.search_web(q), "search the web"), action="browser")
+            if action == "youtube_play":
+                q = query or target
+                if q:
+                    return CommandResult(self.media.search_youtube(q), action="youtube")
+            if action == "spotify_play":
+                q = query or target
+                if q:
+                    return CommandResult(self.media.play_spotify(q), action="spotify")
+            if action == "find_file":
+                q = query or target
+                if q:
+                    return CommandResult(self._search_files(q), action="files")
+            if action == "analyze_folder":
+                t = target or "desktop"
+                if by_context:
+                    return CommandResult(self.system.analyze_folder_context(t), action="files")
+                return CommandResult(self.system.folder_clutter_report(t), action="files")
+            if action == "organize_folder":
+                t = target or "desktop"
+                return CommandResult(self._queue_organization(t, by_context=by_context), action="files")
+            if action == "set_volume" and value is not None:
+                return CommandResult(self.audio.set_volume(int(value)), action="audio")
+            if action == "set_brightness" and value is not None:
+                return CommandResult(self.system.set_brightness(int(value)), action="system")
+            if action == "wifi_on":
+                return CommandResult(self.system.wifi(True), action="system")
+            if action == "wifi_off":
+                return CommandResult(self.system.wifi(False), action="system")
+            if action == "bluetooth_on":
+                return CommandResult(self.system.bluetooth(True), action="system")
+            if action == "bluetooth_off":
+                return CommandResult(self.system.bluetooth(False), action="system")
+            if action == "focus_mode":
+                return CommandResult(self._run_focus_mode(), action="routine")
+            if action == "cowork_mode":
+                return CommandResult("Cowork mode is ready. Say: cowork on <goal> to begin.", action="cowork")
+        except Exception:
+            self.logger.exception("model intent execution failed for action=%s", action)
+            return None
+        return None
+
+    def _extract_json_object(self, text: str) -> dict[str, Any] | None:
+        if not text:
+            return None
+        cleaned = text.strip()
+        try:
+            parsed = json.loads(cleaned)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            return None
+        snippet = cleaned[start : end + 1]
+        try:
+            parsed = json.loads(snippet)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            return None
+        return None
 
     def _sanitize_model_output(self, text: str) -> str:
         cleaned = " ".join(text.strip().split())
@@ -621,6 +718,30 @@ class EdithAssistant:
         if lowered in whitelist:
             return False
         return True
+
+    def _should_try_model_intent(self, lowered: str) -> bool:
+        words = lowered.split()
+        if len(words) < 3:
+            return False
+        if len(words) > 30:
+            return False
+        guidance_tokens = {
+            "open",
+            "play",
+            "search",
+            "find",
+            "organize",
+            "analyse",
+            "analyze",
+            "check",
+            "set",
+            "turn",
+            "please",
+            "could",
+            "can",
+            "help",
+        }
+        return any(token in guidance_tokens for token in words)
 
     def _try_handle_compound_command(self, command: str) -> str | None:
         lowered = command.lower().strip()

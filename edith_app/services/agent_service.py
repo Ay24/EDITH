@@ -45,6 +45,7 @@ class AgentService:
                 "Default to crisp, direct responses. Usually keep it to 2 to 4 short sentences."
             ),
             max_predict=140,
+            timeout_seconds=20,
         )
 
     def plan(self, prompt: str, history: Iterable[ChatMessage]) -> str:
@@ -57,6 +58,7 @@ class AgentService:
                 "and propose a practical path forward. Keep the plan punchy and compact."
             ),
             max_predict=220,
+            timeout_seconds=24,
         )
 
     def brainstorm(self, prompt: str, history: Iterable[ChatMessage]) -> str:
@@ -69,6 +71,7 @@ class AgentService:
                 "angles, and next experiments. Keep it lively but compact."
             ),
             max_predict=220,
+            timeout_seconds=24,
         )
 
     def quick_think(self, prompt: str, history: Iterable[ChatMessage]) -> str:
@@ -80,6 +83,19 @@ class AgentService:
                 "You are Edith's fast tactical model. Give a concise, decisive answer with the next best move."
             ),
             max_predict=96,
+            timeout_seconds=14,
+        )
+
+    def parse_intent(self, prompt: str, history: Iterable[ChatMessage]) -> str:
+        return self._run_model(
+            model=self._config.fast_model,
+            prompt=prompt,
+            history=history,
+            system_instruction=(
+                "You are Edith's intent parser. Return strict JSON only, no markdown, no prose."
+            ),
+            max_predict=120,
+            timeout_seconds=12,
         )
 
     def think_with_user(self, prompt: str, history: Iterable[ChatMessage]) -> str:
@@ -102,6 +118,7 @@ class AgentService:
         history: Iterable[ChatMessage],
         system_instruction: str,
         max_predict: int = 160,
+        timeout_seconds: int = 24,
     ) -> str:
         if not self._server_ready():
             self._logger.warning("ollama server not ready for model=%s", model)
@@ -134,7 +151,7 @@ class AgentService:
                 response = self._session.post(
                     f"{self._config.ollama_url}/api/generate",
                     json=payload,
-                    timeout=24,
+                    timeout=timeout_seconds,
                 )
                 if response.status_code >= 500:
                     self._logger.warning("ollama 5xx status=%s model=%s attempt=%s", response.status_code, model, attempt)
