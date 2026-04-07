@@ -824,12 +824,22 @@ class EdithDesktopUI:
         canvas.itemconfigure(orb_item, fill=orb_color)
 
     def _is_affirmative(self, text: str) -> bool:
-        lowered = text.lower().strip()
-        return lowered in {"yes", "yeah", "yep", "do it", "go ahead", "confirm"}
+        lowered = " ".join(text.lower().strip().split())
+        if not lowered:
+            return False
+        if lowered in {"yes", "yeah", "yep", "do it", "go ahead", "confirm", "sure", "okay", "ok"}:
+            return True
+        words = set(lowered.split())
+        return bool(words.intersection({"yes", "yeah", "yep", "sure", "ok", "okay"}))
 
     def _is_negative(self, text: str) -> bool:
-        lowered = text.lower().strip()
-        return lowered in {"no", "nope", "cancel", "stop", "not that"}
+        lowered = " ".join(text.lower().strip().split())
+        if not lowered:
+            return False
+        if lowered in {"no", "nope", "cancel", "stop", "not that"}:
+            return True
+        words = set(lowered.split())
+        return bool(words.intersection({"no", "nope", "cancel", "stop"}))
 
     def _refresh_runtime_health(self) -> None:
         try:
