@@ -154,15 +154,6 @@ class EdithAssistant:
             self._pending_message_contact = None
             return self._finalize_pending_message(contact, command)
 
-        if self._is_very_short_ambiguous(lowered):
-            result = CommandResult(
-                "I heard you. Want me to search it, play it, or open something specific?",
-                action="quick",
-            )
-            result.reply = self._polish_reply(result.reply, result.action)
-            self._remember("assistant", result.reply)
-            return result
-
         if self._pending_organization and lowered not in {"yes", "yes do it", "do it", "go ahead", "apply", "confirm", "no", "nope", "cancel", "not that"}:
             self._pending_organization = None
 
@@ -262,6 +253,8 @@ class EdithAssistant:
             result = CommandResult(self._online_or_local(self._google(""), "open Google"), action="browser")
         elif lowered.startswith("open github"):
             result = CommandResult(self.media.open_site("https://github.com/", "GitHub"), action="browser")
+        elif lowered.startswith("open stack"):
+            result = CommandResult(self.media.open_site("https://stackoverflow.com/", "Stack Overflow"), action="browser")
         elif lowered.startswith("open stack overflow"):
             result = CommandResult(self.media.open_site("https://stackoverflow.com/", "Stack Overflow"), action="browser")
         elif lowered.startswith("open stackoverflow"):
@@ -514,6 +507,14 @@ class EdithAssistant:
             smalltalk = self._smalltalk_reply(command)
             if smalltalk is not None:
                 result = CommandResult(reply=smalltalk, action="agent")
+                result.reply = self._polish_reply(result.reply, result.action)
+                self._remember("assistant", result.reply)
+                return result
+            if self._is_very_short_ambiguous(lowered):
+                result = CommandResult(
+                    "I heard you. Want me to search it, play it, or open something specific?",
+                    action="quick",
+                )
                 result.reply = self._polish_reply(result.reply, result.action)
                 self._remember("assistant", result.reply)
                 return result
