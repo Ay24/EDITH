@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -32,6 +33,8 @@ class SelfImproveService:
         self._telemetry_path = Path(telemetry_path)
         self._overrides_path = Path(overrides_path)
         self._agent = agent
+        self._last_compile_check_ts = 0.0
+        self._last_compile_ok = True
 
     def status_report(self) -> str:
         metrics = self._metrics()
@@ -62,6 +65,15 @@ class SelfImproveService:
 
     def run(self, goal: str, history: list[ChatMessage], apply: bool = False) -> str:
         metrics = self._metrics()
+        if apply:
+            applied = self._apply_safe_overrides(metrics)
+            proposal = self._fallback_proposal(metrics)
+            return (
+                f"{self._format_metrics(metrics)}\n\n"
+                f"Applied safe runtime tuning: {applied}\n"
+                f"Proposal summary:\n{proposal}"
+            )
+
         prompt = (
             "You are a runtime reliability engineer for a local desktop assistant.\n"
             "Given the metrics, suggest compact, low-risk improvements for speed, stability, and voice quality.\n"
@@ -73,9 +85,13 @@ class SelfImproveService:
             "2) what to monitor\n"
             "3) one low-risk next action."
         )
-        proposal = self._agent.plan(prompt, history)
-        if "preparing the local model" in proposal.lower() or "warming up" in proposal.lower():
+        model_ready, _ = self._agent.runtime_status()
+        if not model_ready:
             proposal = self._fallback_proposal(metrics)
+        else:
+            proposal = self._agent.plan(prompt, history)
+            if "preparing the local model" in proposal.lower() or "warming up" in proposal.lower():
+                proposal = self._fallback_proposal(metrics)
         if not apply:
             return (
                 f"{self._format_metrics(metrics)}\n\n"
@@ -83,13 +99,7 @@ class SelfImproveService:
                 f"{proposal}\n\n"
                 "Say: self improve apply to apply safe runtime tuning only."
             )
-
-        applied = self._apply_safe_overrides(metrics)
-        return (
-            f"{self._format_metrics(metrics)}\n\n"
-            f"Applied safe runtime tuning: {applied}\n"
-            f"Proposal summary:\n{proposal}"
-        )
+        return self._format_metrics(metrics)
 
     def _metrics(self) -> ImproveMetrics:
         compile_ok = self._compile_ok()
@@ -117,17 +127,32 @@ class SelfImproveService:
         )
 
     def _compile_ok(self) -> bool:
+        now = time.monotonic()
+        if now - self._last_compile_check_ts < 300:
+            return self._last_compile_ok
         try:
+            candidates = [
+                self._project_root / "edith_app" / "assistant.py",
+                self._project_root / "edith_app" / "ui.py",
+                self._project_root / "edith_app" / "services" / "agent_service.py",
+                self._project_root / "edith_app" / "services" / "voice_service.py",
+                self._project_root / "edith_app" / "services" / "system_service.py",
+            ]
+            args = ["python", "-m", "py_compile"] + [str(path) for path in candidates if path.exists()]
             result = subprocess.run(
-                ["python", "-m", "compileall", ".", "-q"],
+                args,
                 cwd=self._project_root,
                 capture_output=True,
                 text=True,
-                timeout=120,
+                timeout=25,
                 shell=False,
             )
-            return result.returncode == 0
+            self._last_compile_check_ts = now
+            self._last_compile_ok = result.returncode == 0
+            return self._last_compile_ok
         except Exception:
+            self._last_compile_check_ts = now
+            self._last_compile_ok = False
             return False
 
     def _read_telemetry(self, limit: int) -> list[dict]:

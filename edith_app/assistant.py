@@ -151,6 +151,9 @@ class EdithAssistant:
             self._pending_message_contact = None
             return self._finalize_pending_message(contact, command)
 
+        if self._pending_organization and lowered not in {"yes", "yes do it", "do it", "go ahead", "apply", "confirm", "no", "nope", "cancel", "not that"}:
+            self._pending_organization = None
+
         compound_reply = self._try_handle_compound_command(command)
         if compound_reply is not None:
             result = CommandResult(compound_reply, action="routine")
@@ -208,11 +211,18 @@ class EdithAssistant:
             result = CommandResult(self._resume_cowork_summary(), action="cowork")
         elif lowered.startswith("open youtube"):
             result = CommandResult(self.media.open_youtube_home(), action="youtube")
+        elif lowered in {"youtube", "open yt", "yt"}:
+            result = CommandResult(self.media.open_youtube_home(), action="youtube")
+        elif "play anything interesting" in lowered or "play something interesting" in lowered:
+            result = CommandResult(self.media.launch_youtube_mix("trending cinematic music"), action="youtube")
         elif "youtube mix" in lowered:
             query = self._strip_words(lowered, ["youtube mix", "for"])
             result = CommandResult(self.media.launch_youtube_mix(query or "focus music"), action="youtube")
         elif "play" in lowered and "on youtube" in lowered:
             query = lowered.replace("play", "", 1).replace("on youtube", "", 1).strip()
+            result = CommandResult(self.media.search_youtube(query or "music"), action="youtube")
+        elif lowered.startswith("play "):
+            query = lowered.replace("play", "", 1).strip()
             result = CommandResult(self.media.search_youtube(query or "music"), action="youtube")
         elif lowered.startswith("open spotify"):
             result = CommandResult(self.media.open_spotify(), action="spotify")
@@ -240,6 +250,8 @@ class EdithAssistant:
             result = CommandResult(self._online_or_local(self._google(""), "open Google"), action="browser")
         elif lowered.startswith("open github"):
             result = CommandResult(self.media.open_site("https://github.com/", "GitHub"), action="browser")
+        elif lowered.startswith("open stack overflow"):
+            result = CommandResult(self.media.open_site("https://stackoverflow.com/", "Stack Overflow"), action="browser")
         elif lowered.startswith("open stackoverflow"):
             result = CommandResult(self.media.open_site("https://stackoverflow.com/", "Stack Overflow"), action="browser")
         elif lowered.startswith("open gmail"):
@@ -248,7 +260,7 @@ class EdithAssistant:
             result = CommandResult(self.whatsapp.open_app(), action="system")
         elif lowered in {"self improve status", "self-improve status", "improve status"}:
             result = CommandResult(self.self_improve.status_report(), action="status")
-        elif lowered in {"self improve apply", "self-improve apply"}:
+        elif lowered in {"self improve apply", "self-improve apply", "apply improve", "apply self improve", "improve apply"}:
             run_goal = "improve runtime speed, stability, and voice reliability with safe local tuning"
             result = CommandResult(self.self_improve.run(run_goal, self._context_history(), apply=True), action="status")
         elif lowered.startswith("propose skill for "):
@@ -313,6 +325,17 @@ class EdithAssistant:
             result = CommandResult(self._queue_organization("desktop", by_context=True), action="files")
         elif lowered in {"organize downloads by context", "context organize downloads", "smart organize downloads"}:
             result = CommandResult(self._queue_organization("downloads", by_context=True), action="files")
+        elif lowered in {"organise desktop", "organise desktop by context", "organise downloads", "organise downloads by context"}:
+            normalized = lowered.replace("organise", "organize")
+            if normalized.endswith("by context"):
+                target = "desktop" if "desktop" in normalized else "downloads"
+                result = CommandResult(self._queue_organization(target, by_context=True), action="files")
+            else:
+                target = "desktop" if "desktop" in normalized else "downloads"
+                result = CommandResult(self._queue_organization(target, by_context=False), action="files")
+        elif lowered in {"organize downloads with context", "organize desktop with context"}:
+            target = "desktop" if "desktop" in lowered else "downloads"
+            result = CommandResult(self._queue_organization(target, by_context=True), action="files")
         elif lowered in {"undo last organization", "undo organization", "revert last organization"}:
             result = CommandResult(self.system.undo_last_organization(), action="files")
         elif lowered.startswith("analyze folder "):
@@ -432,6 +455,8 @@ class EdithAssistant:
             result = CommandResult(self._contact_status(name), action="message")
         elif lowered in {"start focus mode", "focus mode"}:
             result = CommandResult(self._run_focus_mode(), action="routine")
+        elif lowered in {"cowork mode", "co work mode", "co-work mode"}:
+            result = CommandResult("Cowork mode is ready. Say: cowork on <goal> to begin.", action="cowork")
         elif lowered in {"start research mode", "research mode"}:
             result = CommandResult(self._run_research_mode(), action="routine")
         elif lowered in {"start coding mode", "coding mode"}:
@@ -501,9 +526,27 @@ class EdithAssistant:
 
     def _safe_agent_reply(self, command: str) -> str:
         try:
-            return self.agent.reply(self._contextualize_prompt(command), self._context_history())
+            lowered = command.lower().strip()
+            if len(lowered.split()) <= 7:
+                reply = self.agent.quick_think(
+                    "Respond as a natural desktop assistant in 1-2 short sentences. "
+                    f"User message: {command}",
+                    self._context_history(),
+                )
+            else:
+                reply = self.agent.reply(self._contextualize_prompt(command), self._context_history())
+            return self._sanitize_model_output(reply)
         except Exception:
             return "I hit a temporary model issue, but I am still here. Please try that once more."
+
+    def _sanitize_model_output(self, text: str) -> str:
+        cleaned = " ".join(text.strip().split())
+        if not cleaned:
+            return text
+        cleaned = re.sub(r"^(user|assistant|system)\s*:\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\b(user|assistant|system)\s*:\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = cleaned.replace("```", "").strip()
+        return cleaned
 
     def _smalltalk_reply(self, command: str) -> str | None:
         lowered = command.lower().strip()
@@ -511,6 +554,11 @@ class EdithAssistant:
         normalized = " ".join(normalized.split())
         smalltalk_map = {
             "hi": "Hey. I am here with you.",
+            "hii": "Hey. I am here with you.",
+            "hiii": "Hey. I am here with you.",
+            "hay": "Hey. I am here with you.",
+            "heyy": "Hey. I am here with you.",
+            "helo": "Hello. Ready when you are.",
             "hello": "Hello. Ready when you are.",
             "hey": "Hey. What should we do next?",
             "how are you": "I am doing great and ready to help.",
@@ -519,6 +567,8 @@ class EdithAssistant:
             "good evening": "Good evening. What should I handle first?",
             "thanks": "Always. Want me to do the next step too?",
             "thank you": "Anytime. I can keep going.",
+            "what else can you do": "I can control apps, media, files, routines, cowork tasks, and system actions. Tell me one thing and I will do it.",
+            "can you play anything interesting for me": "Sure. I can start a cinematic mix on YouTube or a deep-focus playlist on Spotify. Say which one you want.",
         }
         if normalized in smalltalk_map:
             return smalltalk_map[normalized]

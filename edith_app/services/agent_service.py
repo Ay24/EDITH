@@ -42,6 +42,7 @@ class AgentService:
                 f"{self._config.persona.system_prompt} "
                 "Default to crisp, direct responses. Usually keep it to 2 to 4 short sentences."
             ),
+            max_predict=140,
         )
 
     def plan(self, prompt: str, history: Iterable[ChatMessage]) -> str:
@@ -53,6 +54,7 @@ class AgentService:
                 "You are Edith's planning model. Break problems into clear steps, identify tradeoffs, "
                 "and propose a practical path forward. Keep the plan punchy and compact."
             ),
+            max_predict=220,
         )
 
     def brainstorm(self, prompt: str, history: Iterable[ChatMessage]) -> str:
@@ -64,6 +66,7 @@ class AgentService:
                 "You are Edith's creative ideation model. Generate bold but practical ideas, alternatives, "
                 "angles, and next experiments. Keep it lively but compact."
             ),
+            max_predict=220,
         )
 
     def quick_think(self, prompt: str, history: Iterable[ChatMessage]) -> str:
@@ -74,6 +77,7 @@ class AgentService:
             system_instruction=(
                 "You are Edith's fast tactical model. Give a concise, decisive answer with the next best move."
             ),
+            max_predict=96,
         )
 
     def think_with_user(self, prompt: str, history: Iterable[ChatMessage]) -> str:
@@ -95,6 +99,7 @@ class AgentService:
         prompt: str,
         history: Iterable[ChatMessage],
         system_instruction: str,
+        max_predict: int = 160,
     ) -> str:
         if not self._server_ready():
             self._recover_async(model)
@@ -105,7 +110,7 @@ class AgentService:
             return f"I am preparing the local model '{model}'. Keep Edith open and I will use it as soon as it finishes loading."
 
         transcript = [system_instruction]
-        for item in list(history)[-10:]:
+        for item in list(history)[-6:]:
             transcript.append(f"{item.source.title()}: {item.text}")
         transcript.append(f"User: {prompt}")
 
@@ -114,6 +119,10 @@ class AgentService:
             "prompt": "\n".join(transcript) + "\nAssistant:",
             "stream": False,
             "keep_alive": "10m",
+            "options": {
+                "num_predict": max_predict,
+                "temperature": 0.45,
+            },
         }
 
         for attempt in range(2):
@@ -121,7 +130,7 @@ class AgentService:
                 response = self._session.post(
                     f"{self._config.ollama_url}/api/generate",
                     json=payload,
-                    timeout=60,
+                    timeout=24,
                 )
                 if response.status_code >= 500:
                     if attempt == 0:
