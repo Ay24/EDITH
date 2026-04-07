@@ -95,6 +95,12 @@ class AppConfig:
             str(Path("data") / "edith_self_improve_overrides.json"),
         )
     )
+    runtime_log_path: str = field(
+        default_factory=lambda: os.getenv(
+            "EDITH_RUNTIME_LOG_PATH",
+            str(Path("data") / "edith_runtime.log"),
+        )
+    )
     contacts: dict[str, str] = field(
         default_factory=lambda: {
             "primary_contact": "+10000000001",

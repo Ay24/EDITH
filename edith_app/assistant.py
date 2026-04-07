@@ -20,6 +20,7 @@ from edith_app.services.agent_service import AgentService
 from edith_app.services.audio_service import AudioService
 from edith_app.services.connectivity_service import ConnectivityService
 from edith_app.services.knowledge_service import KnowledgeService
+from edith_app.services.logging_service import get_logger
 from edith_app.services.media_service import MediaService
 from edith_app.services.memory_service import MemoryService
 from edith_app.services.notes_service import NotesService
@@ -39,6 +40,7 @@ class EdithAssistant:
     def __init__(self, config: AppConfig) -> None:
         self.config = config
         self.history: list[ChatMessage] = []
+        self.logger = get_logger("edith.assistant", config.runtime_log_path)
         self.agent = AgentService(config)
         self.audio = AudioService()
         self.voice = VoiceService(config)
@@ -109,6 +111,7 @@ class EdithAssistant:
         command = command.strip()
         lowered = command.lower()
         self._remember("user", command)
+        self.logger.info("handle command: %s", lowered[:180])
 
         if lowered in {"yes", "yes do it", "do it", "go ahead"} and self._pending_suggestion:
             replay_command = self._pending_suggestion
@@ -150,6 +153,15 @@ class EdithAssistant:
             contact = self._pending_message_contact
             self._pending_message_contact = None
             return self._finalize_pending_message(contact, command)
+
+        if self._is_very_short_ambiguous(lowered):
+            result = CommandResult(
+                "I heard you. Want me to search it, play it, or open something specific?",
+                action="quick",
+            )
+            result.reply = self._polish_reply(result.reply, result.action)
+            self._remember("assistant", result.reply)
+            return result
 
         if self._pending_organization and lowered not in {"yes", "yes do it", "do it", "go ahead", "apply", "confirm", "no", "nope", "cancel", "not that"}:
             self._pending_organization = None
@@ -537,6 +549,7 @@ class EdithAssistant:
                 reply = self.agent.reply(self._contextualize_prompt(command), self._context_history())
             return self._sanitize_model_output(reply)
         except Exception:
+            self.logger.exception("safe agent reply failed")
             return "I hit a temporary model issue, but I am still here. Please try that once more."
 
     def _sanitize_model_output(self, text: str) -> str:
@@ -575,6 +588,38 @@ class EdithAssistant:
         if normalized.startswith("hi ") or normalized.startswith("hello ") or normalized.startswith("hey "):
             return "Hey. I am listening."
         return None
+
+    def _is_very_short_ambiguous(self, lowered: str) -> bool:
+        if not lowered:
+            return False
+        if any(ch.isdigit() for ch in lowered):
+            return False
+        if len(lowered.split()) > 2:
+            return False
+        known_prefixes = (
+            "open ",
+            "play ",
+            "set ",
+            "turn ",
+            "run ",
+            "export ",
+            "search ",
+            "find ",
+            "send ",
+            "message ",
+            "call ",
+            "wifi",
+            "bluetooth",
+            "preflight",
+            "debug",
+            "self improve",
+        )
+        if lowered.startswith(known_prefixes):
+            return False
+        whitelist = {"hi", "hii", "hiii", "hay", "hey", "hello", "thanks", "thank you", "youtube", "spotify", "google"}
+        if lowered in whitelist:
+            return False
+        return True
 
     def _try_handle_compound_command(self, command: str) -> str | None:
         lowered = command.lower().strip()

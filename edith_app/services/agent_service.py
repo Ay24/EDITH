@@ -12,11 +12,13 @@ import requests
 
 from edith_app.config import AppConfig
 from edith_app.models import ChatMessage
+from edith_app.services.logging_service import get_logger
 
 
 class AgentService:
     def __init__(self, config: AppConfig) -> None:
         self._config = config
+        self._logger = get_logger("edith.agent", config.runtime_log_path)
         self._session = requests.Session()
         self._tags_cache: tuple[float, set[str]] = (0.0, set())
         self._recovery_lock = threading.Lock()
@@ -102,10 +104,12 @@ class AgentService:
         max_predict: int = 160,
     ) -> str:
         if not self._server_ready():
+            self._logger.warning("ollama server not ready for model=%s", model)
             self._recover_async(model)
             return "Ollama is starting up. Keep Edith open for a moment and try again."
         target_model = model
         if not self._model_available(target_model):
+            self._logger.warning("ollama model missing model=%s", model)
             self._recover_async(model)
             return f"I am preparing the local model '{model}'. Keep Edith open and I will use it as soon as it finishes loading."
 
@@ -133,6 +137,7 @@ class AgentService:
                     timeout=24,
                 )
                 if response.status_code >= 500:
+                    self._logger.warning("ollama 5xx status=%s model=%s attempt=%s", response.status_code, model, attempt)
                     if attempt == 0:
                         time.sleep(1.0)
                         continue
@@ -142,6 +147,7 @@ class AgentService:
                 try:
                     data = response.json()
                 except json.JSONDecodeError:
+                    self._logger.warning("ollama invalid json model=%s attempt=%s", model, attempt)
                     if attempt == 0:
                         time.sleep(0.8)
                         continue
@@ -149,12 +155,14 @@ class AgentService:
                     return f"The local model '{model}' returned an invalid response while warming up. Try again in a moment."
                 return data.get("response", "").strip() or "The local model returned an empty response."
             except requests.RequestException:
+                self._logger.warning("ollama request exception model=%s attempt=%s", model, attempt, exc_info=True)
                 if attempt == 0:
                     time.sleep(0.8)
                     continue
                 self._recover_async(model)
                 return f"I couldn't reach the local model '{model}' just now. Edith is still trying to bring Ollama online."
             except Exception:
+                self._logger.exception("unexpected model runtime error model=%s attempt=%s", model, attempt)
                 if attempt == 0:
                     time.sleep(0.6)
                     continue

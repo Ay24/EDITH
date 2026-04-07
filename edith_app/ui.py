@@ -11,11 +11,13 @@ from pathlib import Path
 from tkinter import ttk
 
 from edith_app.assistant import EdithAssistant
+from edith_app.services.logging_service import get_logger
 
 
 class EdithDesktopUI:
     def __init__(self, assistant: EdithAssistant) -> None:
         self.assistant = assistant
+        self.logger = get_logger("edith.ui", assistant.config.runtime_log_path)
         self.root = tk.Tk()
         self.root.title("Edith Neural Console")
         self.root.geometry("1200x780")
@@ -469,6 +471,7 @@ class EdithDesktopUI:
             result = self.assistant.handle(command)
             self.voice_queue.put(("command_result", (request_id, command, started_at, result, None)))
         except Exception as exc:
+            self.logger.exception("command worker failed for request=%s command=%s", request_id, command)
             self.voice_queue.put(("command_result", (request_id, command, started_at, None, str(exc))))
 
     def _on_command_timeout(self, request_id: int, command: str, started_at: float) -> None:
@@ -664,6 +667,7 @@ class EdithDesktopUI:
                 else:
                     self._append(kind, payload)
             except Exception as exc:
+                self.logger.exception("voice queue processing failed")
                 self._append("error", f"UI queue recovered from an error: {exc}")
         self.root.after(80, self._process_voice_queue)
 

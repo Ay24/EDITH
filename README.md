@@ -90,6 +90,12 @@ When internet is unavailable, Edith now stays useful instead of failing noisily:
 - `wifi off`
 - `brainstorm a local-first AI product`
 - `plan my study workflow`
+- `run preflight`
+- `export debug bundle`
+- `self improve status`
+- `self improve`
+- `self improve apply`
+- `propose skill for smart browser automation`
 
 ## Project Layout
 
@@ -119,6 +125,18 @@ When internet is unavailable, Edith now stays useful instead of failing noisily:
 - `EDITH_AUTO_PULL_MODELS`
 - `EDITH_PREFER_OFFLINE_VOICE`
 - `EDITH_VOSK_MODEL_PATH`
+- `EDITH_VOICE_TIMEOUT`
+- `EDITH_COMMAND_TIMEOUT`
+- `EDITH_VOICE_CONFIDENCE_THRESHOLD`
+- `EDITH_DATA_DIR`
+- `EDITH_MEMORY_PATH`
+- `EDITH_NOTES_PATH`
+- `EDITH_SESSION_MEMORY_PATH`
+- `EDITH_COWORK_TASKS_PATH`
+- `EDITH_ORGANIZATION_MANIFEST_PATH`
+- `EDITH_TELEMETRY_PATH`
+- `EDITH_SELF_IMPROVE_OVERRIDES_PATH`
+- `EDITH_RUNTIME_LOG_PATH`
 
 ## Notes
 
@@ -126,3 +144,5 @@ When internet is unavailable, Edith now stays useful instead of failing noisily:
 - If a required model is missing and `EDITH_AUTO_PULL_MODELS=1`, Edith will try to pull it.
 - If `models/vosk` is missing, Edith falls back to the online speech recognizer when internet is available.
 - Context sorting uses file names, folder context, document text where readable, and, when available, a local Ollama vision model for image descriptions. It can also separate likely duplicates and blurry images. It still avoids deleting anything, and the last organization run can be undone.
+- Runtime logs are written to `data/edith_runtime.log` and command telemetry is written to `data/edith_telemetry.jsonl`.
+- `self improve apply` only applies safe runtime tuning values. It does not retrain models or auto-edit code.

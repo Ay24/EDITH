@@ -17,6 +17,7 @@ build/
 !models/.gitkeep
 data/*.json
 data/*.jsonl
+data/generated_skills/
 edith_memory.jsonl
 notes.txt
 .env
