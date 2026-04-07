@@ -94,8 +94,8 @@ class AgentService:
             system_instruction=(
                 "You are Edith's intent parser. Return strict JSON only, no markdown, no prose."
             ),
-            max_predict=120,
-            timeout_seconds=12,
+            max_predict=72,
+            timeout_seconds=6,
         )
 
     def think_with_user(self, prompt: str, history: Iterable[ChatMessage]) -> str:

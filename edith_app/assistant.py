@@ -164,6 +164,13 @@ class EdithAssistant:
             self._remember("assistant", result.reply)
             return result
 
+        if self._should_try_model_intent_first(lowered):
+            intent_first = self._try_model_tool_intent(command)
+            if intent_first is not None:
+                intent_first.reply = self._polish_reply(intent_first.reply, intent_first.action)
+                self._remember("assistant", intent_first.reply)
+                return intent_first
+
         if not command:
             result = CommandResult("I need a command to work with.")
         elif lowered in {"help", "capabilities", "what can you do"}:
@@ -560,13 +567,17 @@ class EdithAssistant:
             return "I hit a temporary model issue, but I am still here. Please try that once more."
 
     def _try_model_tool_intent(self, command: str) -> CommandResult | None:
+        model_ready, _ = self.agent.runtime_status()
+        if not model_ready:
+            return None
         prompt = (
             "Map the user request to one assistant action.\n"
             "Return only JSON in this schema:\n"
-            '{"action":"...", "target":"", "query":"", "value":0, "by_context":false}\n'
+            '{"action":"...", "target":"", "query":"", "value":0, "by_context":false, "confidence":0.0}\n'
             "Allowed actions: open_target, web_search, youtube_play, spotify_play, find_file, "
             "analyze_folder, organize_folder, set_volume, set_brightness, wifi_on, wifi_off, "
             "bluetooth_on, bluetooth_off, focus_mode, cowork_mode, none.\n"
+            "Confidence should be between 0.0 and 1.0.\n"
             f"User request: {command}"
         )
         raw = self.agent.parse_intent(prompt, self._context_history())
@@ -578,6 +589,13 @@ class EdithAssistant:
         query = str(parsed.get("query", "")).strip()
         by_context = bool(parsed.get("by_context", False))
         value = parsed.get("value", None)
+        confidence = parsed.get("confidence", 0.0)
+        try:
+            confidence_value = float(confidence)
+        except Exception:
+            confidence_value = 0.0
+        if confidence_value < 0.55:
+            return None
 
         try:
             if action == "open_target" and target:
@@ -742,6 +760,64 @@ class EdithAssistant:
             "help",
         }
         return any(token in guidance_tokens for token in words)
+
+    def _should_try_model_intent_first(self, lowered: str) -> bool:
+        if not lowered:
+            return False
+        words = lowered.split()
+        if len(words) < 3:
+            return False
+        if len(words) > 30:
+            return False
+        direct_prefixes = (
+            "show tasks",
+            "task list",
+            "next task",
+            "complete task",
+            "clear done tasks",
+            "run preflight",
+            "export debug bundle",
+            "self improve",
+            "set volume",
+            "set brightness",
+            "focus mode",
+            "cowork mode",
+            "analyze desktop",
+            "analyze downloads",
+            "organize desktop",
+            "organize downloads",
+            "open youtube",
+            "open spotify",
+            "open google",
+            "open stack",
+            "open whatsapp",
+            "open settings",
+            "wifi ",
+            "bluetooth ",
+            "message ",
+            "send message to",
+            "call ",
+        )
+        if lowered.startswith(direct_prefixes):
+            return False
+        natural_markers = {
+            "could",
+            "can",
+            "please",
+            "help",
+            "find",
+            "search",
+            "open",
+            "play",
+            "organize",
+            "analyse",
+            "analyze",
+            "set",
+            "turn",
+            "show",
+            "tell",
+        }
+        return any(token in natural_markers for token in words)
 
     def _try_handle_compound_command(self, command: str) -> str | None:
         lowered = command.lower().strip()
