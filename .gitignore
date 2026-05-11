@@ -13,12 +13,14 @@ build/
 *.egg-info/
 !data/
 !models/
-!data/.gitkeep
+models/*
 !models/.gitkeep
+!data/.gitkeep
 data/*.json
 data/*.jsonl
 data/generated_skills/
 edith_memory.jsonl
 notes.txt
 .env
+.env.cloud
 

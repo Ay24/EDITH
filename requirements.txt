@@ -1,4 +1,4 @@
-﻿requests==2.32.5
+requests==2.32.5
 SpeechRecognition==3.15.1
 PyAudio==0.2.14
 pyautogui==0.9.54
@@ -11,3 +11,11 @@ pycaw==20251023
 vosk==0.3.45
 Pillow==11.3.0
 python-docx==1.2.0
+keyboard==0.13.5
+pytesseract>=0.3.10
+pywinauto>=0.6.8
+kokoro>=0.9.4
+sounddevice>=0.4.6
+psutil>=5.9.0
+pynvml>=11.5.0
+llama-cpp-python>=0.2.70

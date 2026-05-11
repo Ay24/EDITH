@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import traceback
+import tkinter as tk
 
 from edith_app.assistant import EdithAssistant
 from edith_app.config import AppConfig
@@ -11,6 +12,10 @@ from edith_app.ui import EdithDesktopUI
 
 
 def main() -> None:
+    # Centralized UI Root — catches any implicit root spawns from libraries
+    root = tk.Tk()
+    root.withdraw()
+
     config = AppConfig()
     logger = get_logger("edith.app", config.runtime_log_path)
 
@@ -23,5 +28,5 @@ def main() -> None:
     bootstrap = BootstrapService(config)
     bootstrap.start_async()
     assistant = EdithAssistant(config)
-    ui = EdithDesktopUI(assistant)
+    ui = EdithDesktopUI(assistant, root=root)
     ui.run()

@@ -5,51 +5,72 @@ import queue
 import threading
 import time
 import tkinter as tk
+from collections import deque
 from datetime import datetime
-from math import sin
+from math import sin, cos, pi
 from pathlib import Path
 from tkinter import ttk
+from typing import Any, Callable
 
 from edith_app.assistant import EdithAssistant
 from edith_app.services.logging_service import get_logger
-
+from edith_app.models import CommandResult
 
 class EdithDesktopUI:
-    def __init__(self, assistant: EdithAssistant) -> None:
+    def __init__(self, assistant: EdithAssistant, root: tk.Tk | None = None) -> None:
         self.assistant = assistant
         self.logger = get_logger("edith.ui", assistant.config.runtime_log_path)
-        self.root = tk.Tk()
+        
+        # Use centralized root passed from app.py
+        self.root = root if root else tk.Tk()
         self.root.title("Edith Neural Console")
-        self.root.geometry("1200x780")
+        
+        # Frameless Transparent HUD
+        self.root.overrideredirect(True)
+        self._target_alpha = max(0.94, min(1.0, assistant.config.ui_alpha))
+        self.root.attributes("-alpha", 0.0)
+        self.root.attributes("-topmost", True)
+        
+        # Center HUD on screen
+        w, h = 1260, 820
+        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        self._base_x = (sw - w) // 2
+        self._base_y = (sh - h) // 2
+        self.root.geometry(f"{w}x{h}+{self._base_x}+{self._base_y + 18}")
         self.root.minsize(980, 680)
+        
         self._colors = {
-            "bg": "#071018",
-            "panel": "#0c1824",
-            "card": "#102333",
-            "hero": "#0d2c3d",
-            "glass": "#15384b",
-            "surface": "#081723",
-            "entry": "#122838",
-            "line": "#204359",
-            "text": "#e6fdff",
-            "muted": "#8dcad3",
-            "accent": "#54d8ff",
-            "accent_soft": "#9aefff",
-            "success": "#79f1ca",
-            "warn": "#ffd166",
-            "error": "#ff8f8f",
+            "bg": "#000001",  # Transparent key color
+            "panel": "#0A0F1A",
+            "card": "#111827",
+            "hero": "#1F2937",
+            "glass": "#374151",
+            "surface": "#0F172A",
+            "entry": "#1E293B",
+            "line": "#334155",
+            "text": "#F8FAFC",
+            "muted": "#94A3B8",
+            "accent": "#38BDF8",
+            "accent_soft": "#7DD3FC",
+            "success": "#34D399",
+            "warn": "#FBBF24",
+            "error": "#EF4444",
         }
         self.root.configure(bg=self._colors["bg"])
+        self.root.wm_attributes("-transparentcolor", self._colors["bg"])
 
+        # State Variables
         self.input_var = tk.StringVar()
         self.status_var = tk.StringVar()
-        self.health_var = tk.StringVar(value="Runtime health loading...")
+        self.health_var = tk.StringVar(value="Neural systems warming up...")
         self.mode_var = tk.StringVar()
-        self.quick_var = tk.StringVar(value="Try: cowork on improving startup performance")
-        self.entity_var = tk.StringVar(value="Detected entities and cowork insights will appear here.")
-        self.cowork_var = tk.StringVar(value="Cowork queue and edit proposals will appear here.")
-        self.preflight_var = tk.StringVar(value="Run preflight to verify model, voice, and runtime readiness.")
+        self.situation_var = tk.StringVar(value="Initializing neural systems...")
+        self.quick_var = tk.StringVar(value="JARVIS: Ready for command.")
+        self.entity_var = tk.StringVar(value="Neural entity analysis pending...")
+        self.cowork_var = tk.StringVar(value="Cowork pipeline idle.")
+        self.preflight_var = tk.StringVar(value="Diagnostics nominal.")
         self.voice_var = tk.StringVar(value="Voice mode offline")
+        
         self.chat_log: tk.Text | None = None
         self.command_entry: tk.Entry | None = None
         self.voice_enabled = False
@@ -59,37 +80,161 @@ class EdithDesktopUI:
         self.processing = False
         self.immersive_window: tk.Toplevel | None = None
         self.voice_state = "idle"
-        self.voice_state_label_var = tk.StringVar(value="Idle")
+        self.voice_state_label_var = tk.StringVar(value="STATE: IDLE")
         self.loading_var = tk.StringVar(value="")
+        self._stream_token_buffer: deque[str] = deque()
+        self._stream_flush_scheduled = False
+        self._max_chat_lines = max(200, assistant.config.ui_max_chat_lines)
+        
+        # 3D Graphics State
         self._animation_tick = 0
+        self._rotation_angle = 0.0
         self.voice_canvas: tk.Canvas | None = None
-        self.voice_orb = None
-        self.voice_glow = None
-        self.immersive_canvas: tk.Canvas | None = None
-        self.immersive_orb = None
-        self.immersive_glow = None
-        self._queued_voice_state = "idle"
-        self.command_history: list[str] = []
-        self.command_history_index: int = -1
-        self._deferred_command: str | None = None
-        self._request_seq = 0
-        self._active_request_id: int | None = None
-        self._timed_out_requests: set[int] = set()
-        self._pending_voice_command: str | None = None
-        self._pending_voice_confidence: float | None = None
-        self._telemetry_path = Path(self.assistant.config.telemetry_path)
+        self._ring_steps = 40
+
+        # Motion System State
+        self._ui_motion_frame_ms = 16  # ~60 FPS
+        self._intro_started_at = time.perf_counter()
+        self._intro_complete = False
+        self._hover_states: dict[tk.Widget, dict[str, Any]] = {}
+        self._motion_last_tick = time.perf_counter()
+        self._action_buttons: list[tk.Button] = []
+        self._execute_button: tk.Button | None = None
+        
+        # Drag Logic State
+        self._drag_data = {"x": 0, "y": 0}
+        self._drag_active = False
+        self._drag_last_screen_x = 0.0
+        self._drag_last_screen_y = 0.0
+        self._drag_last_t = time.perf_counter()
+        self._window_px = float(self._base_x)
+        self._window_py = float(self._base_y + 18)
+        self._window_vx = 0.0
+        self._window_vy = 0.0
+        self._window_bounds_margin = 8
+        self._window_soft_overscroll = 64.0
+        self._drag_region_widgets: list[tk.Widget] = []
+        self._after_ids: set[str] = set()
+        self._closed = False
 
         self._build_theme()
         self._build_layout()
         self._initialize()
-        self.root.after(80, self._process_voice_queue)
-        self.root.after(80, self._animate_orbs)
+        
+        # Background loops
+        self._schedule(80, self._process_voice_queue)
+        self._schedule(self._ui_motion_frame_ms, self._animate_sphere)
+        self._schedule(self._ui_motion_frame_ms, self._motion_tick)
+        
+        # Restore Taskbar presence for frameless window
+        self._schedule(520, self._set_appwindow)
         self.root.protocol("WM_DELETE_WINDOW", self._shutdown)
-        self.root.bind("<Control-l>", lambda event: self._focus_command_entry())
-        self.root.bind("<Control-Return>", lambda event: self._submit())
+        
+        # Smart Hotkey Integration
+        try:
+            import keyboard
+            keyboard.add_hotkey('ctrl+shift+space', lambda: self.root.after(0, self._toggle_wake_mode))
+            self.logger.info("Global hotkey ctrl+shift+space registered for voice wake.")
+        except ImportError:
+            self.logger.warning("Keyboard module not installed; global hotkeys disabled.")
+        except Exception as e:
+            self.logger.warning(f"Could not bind global hotkey: {e}")
+
+        # Final Reveal (root was withdrawn in app.py)
+        self.root.deiconify()
+        self.root.focus_force()
 
     def run(self) -> None:
         self.root.mainloop()
+
+    def _schedule(self, delay_ms: int, callback: Callable[[], None]) -> str | None:
+        if self._closed:
+            return None
+        after_id: str | None = None
+
+        def _run() -> None:
+            if after_id is not None:
+                self._after_ids.discard(after_id)
+            if not self._closed:
+                callback()
+
+        after_id = self.root.after(delay_ms, _run)
+        self._after_ids.add(after_id)
+        return after_id
+
+    def _cancel_after_jobs(self) -> None:
+        for after_id in list(self._after_ids):
+            try:
+                self.root.after_cancel(after_id)
+            except Exception:
+                pass
+            self._after_ids.discard(after_id)
+
+    # ── Frameless Chassis Logic ───────────────────────────────────────────────
+
+    def _set_appwindow(self) -> None:
+        """Forces the borderless window to appear in the Windows Taskbar and Alt+Tab."""
+        try:
+            from ctypes import windll
+            GWL_EXSTYLE = -20
+            WS_EX_APPWINDOW = 0x00040000
+            WS_EX_TOOLWINDOW = 0x00000080
+            hwnd = windll.user32.GetParent(self.root.winfo_id())
+            style = windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            style = style & ~WS_EX_TOOLWINDOW
+            style = style | WS_EX_APPWINDOW
+            windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
+            # Re-assert visibility to flush OS change
+            self.root.withdraw()
+            self.root.deiconify()
+        except Exception as e:
+            self.logger.warning(f"Could not force taskbar visibility: {e}")
+
+    def _start_drag(self, event) -> None:
+        self._drag_active = True
+        self._drag_data["x"] = event.x_root - self.root.winfo_x()
+        self._drag_data["y"] = event.y_root - self.root.winfo_y()
+        self._drag_last_screen_x = float(event.x_root)
+        self._drag_last_screen_y = float(event.y_root)
+        self._drag_last_t = time.perf_counter()
+        self._window_vx = 0.0
+        self._window_vy = 0.0
+
+    def _on_drag(self, event) -> None:
+        if not self._drag_active:
+            return
+        now = time.perf_counter()
+        dt = max(0.001, now - self._drag_last_t)
+        new_x = float(event.x_root - self._drag_data["x"])
+        new_y = float(event.y_root - self._drag_data["y"])
+
+        self._window_vx = (float(event.x_root) - self._drag_last_screen_x) / dt
+        self._window_vy = (float(event.y_root) - self._drag_last_screen_y) / dt
+        self._drag_last_screen_x = float(event.x_root)
+        self._drag_last_screen_y = float(event.y_root)
+        self._drag_last_t = now
+
+        self._window_px = new_x
+        self._window_py = new_y
+        self._apply_window_geometry(int(new_x), int(new_y))
+
+    def _end_drag(self, _event) -> None:
+        self._drag_active = False
+
+    def _shutdown(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self.voice_enabled = False
+        self.stop_event.set()
+        self._cancel_after_jobs()
+        try:
+            self.assistant.stop_voice_session()
+        except Exception:
+            pass
+        self.root.destroy()
+
+    # ── Theme & Layout ────────────────────────────────────────────────────────
 
     def _build_theme(self) -> None:
         style = ttk.Style()
@@ -97,30 +242,29 @@ class EdithDesktopUI:
             style.theme_use("clam")
         except Exception:
             pass
-
         style.configure("Panel.TFrame", background=self._colors["bg"])
         style.configure("Card.TFrame", background=self._colors["card"])
         style.configure("Hero.TFrame", background=self._colors["hero"])
         style.configure("Glass.TFrame", background=self._colors["glass"])
-        style.configure("Title.TLabel", background=self._colors["hero"], foreground=self._colors["text"], font=("Segoe UI Semibold", 24))
+        style.configure("Title.TLabel", background=self._colors["hero"], foreground=self._colors["text"], font=("Segoe UI Semibold", 22))
         style.configure("Sub.TLabel", background=self._colors["hero"], foreground=self._colors["muted"], font=("Segoe UI", 10))
-        style.configure("CardTitle.TLabel", background=self._colors["card"], foreground=self._colors["text"], font=("Segoe UI Semibold", 11))
-        style.configure("CardBody.TLabel", background=self._colors["card"], foreground=self._colors["muted"], font=("Segoe UI", 10))
+        style.configure("CardTitle.TLabel", background=self._colors["card"], foreground=self._colors["accent"], font=("Segoe UI Semibold", 11))
+        style.configure("CardBody.TLabel", background=self._colors["card"], foreground=self._colors["text"], font=("Segoe UI", 10))
         style.configure("Action.TButton", font=("Segoe UI Semibold", 10), padding=9)
         style.map(
             "Action.TButton",
-            background=[("active", self._colors["glass"])],
-            foreground=[("active", self._colors["text"])],
+            background=[("active", self._colors["accent"]), ("!active", self._colors["glass"])],
+            foreground=[("active", self._colors["bg"]), ("!active", self._colors["text"])],
         )
-        style.configure("Status.TLabel", background=self._colors["glass"], foreground=self._colors["text"], font=("Segoe UI", 10))
-        style.configure("Meta.TLabel", background=self._colors["card"], foreground=self._colors["accent_soft"], font=("Segoe UI Semibold", 9))
+        style.configure("Status.TLabel", background=self._colors["glass"], foreground=self._colors["accent_soft"], font=("Segoe UI", 10))
+        style.configure("Meta.TLabel", background=self._colors["card"], foreground=self._colors["success"], font=("Segoe UI Semibold", 9))
 
     def _build_layout(self) -> None:
         self.root.columnconfigure(0, weight=0)
         self.root.columnconfigure(1, weight=1)
         self.root.rowconfigure(0, weight=1)
 
-        sidebar = ttk.Frame(self.root, style="Panel.TFrame", width=290)
+        sidebar = ttk.Frame(self.root, style="Panel.TFrame", width=320)
         sidebar.grid(row=0, column=0, sticky="nsew")
         sidebar.grid_propagate(False)
         sidebar.columnconfigure(0, weight=1)
@@ -129,41 +273,120 @@ class EdithDesktopUI:
         main.grid(row=0, column=1, sticky="nsew")
         main.columnconfigure(0, weight=1)
         main.rowconfigure(1, weight=1)
-        main.rowconfigure(2, weight=0)
 
+        # 1. Hero HUD
         hero = ttk.Frame(main, style="Hero.TFrame", padding=22)
         hero.grid(row=0, column=0, sticky="ew", padx=16, pady=16)
         hero.columnconfigure(0, weight=1)
-        hero.columnconfigure(1, weight=0)
-        ttk.Label(hero, text="Edith Neural Console", style="Title.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(
-            hero,
-            text="Always-listening voice, multi-model local AI, coworker mode, system control, and media automation in one desktop surface.",
-            style="Sub.TLabel",
-        ).grid(row=1, column=0, sticky="w", pady=(6, 0))
-        ttk.Label(
-            hero,
-            text="LOCAL-FIRST  •  VOICE-NATIVE  •  COWORKER MODE",
-            style="Meta.TLabel",
-        ).grid(row=2, column=0, sticky="w", pady=(12, 0))
-        ttk.Button(hero, text="Toggle Voice Mode", style="Action.TButton", command=self._toggle_wake_mode).grid(
-            row=0, column=1, rowspan=3, sticky="e"
+        self._hero_frame = hero
+        
+        # Custom Tactical Controls [X] [^] [⛶]
+        actions = tk.Frame(hero, bg=self._colors["hero"])
+        actions.place(relx=1.0, rely=0.0, anchor="ne", x=10, y=-10)
+        
+        close_btn = tk.Button(
+            actions,
+            text="X",
+            bg=self._colors["error"],
+            fg="white",
+            font=("Segoe UI Bold", 10),
+            relief="flat",
+            padx=10,
+            pady=5,
+            activebackground="#ff0000",
+            command=self._shutdown,
         )
-        ttk.Button(hero, text="Immersive Mode", style="Action.TButton", command=self._toggle_immersive_mode).grid(
-            row=0, column=2, rowspan=3, sticky="e", padx=(10, 0)
-        )
+        close_btn.pack(side="right", padx=2)
+        self._bind_smooth_hover(close_btn, self._colors["error"], "#f87171")
+        
+        self._saved_geom = None
+        def toggle_fullscreen():
+            if self._saved_geom is None:
+                self._saved_geom = self.root.winfo_geometry()
+                sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+                self.root.geometry(f"{sw}x{sh}+0+0")
+                fullscreen_btn.config(bg=self._colors["success"])
+            else:
+                self.root.geometry(self._saved_geom)
+                self._saved_geom = None
+                fullscreen_btn.config(bg=self._colors["glass"])
+        
+        fullscreen_btn = tk.Button(actions, text="[]", bg=self._colors["glass"], fg="white",
+                           font=("Segoe UI", 10), relief="flat", padx=8, pady=5,
+                           command=toggle_fullscreen)
+        fullscreen_btn.pack(side="right", padx=2)
+        self._bind_smooth_hover(fullscreen_btn, self._colors["glass"], self._colors["accent"])
 
+        def toggle_terminal():
+            if getattr(self, "_terminal_window", None) is None:
+                from edith_app.core.ui_terminal import TerminalWindow
+                self._terminal_window = TerminalWindow(self.root)
+            else:
+                if self._terminal_window.toplevel.winfo_viewable():
+                    self._terminal_window.hide()
+                    term_btn.config(bg=self._colors["glass"])
+                else:
+                    self._terminal_window.show()
+                    term_btn.config(bg=self._colors["success"])
+
+        term_btn = tk.Button(actions, text=">_", bg=self._colors["glass"], fg="white",
+                           font=("Consolas Bold", 10), relief="flat", padx=8, pady=5,
+                           command=toggle_terminal)
+        term_btn.pack(side="right", padx=2)
+        self._bind_smooth_hover(term_btn, self._colors["glass"], self._colors["accent"])
+
+        def toggle_top():
+            is_top = self.root.attributes("-topmost")
+            self.root.attributes("-topmost", not is_top)
+            pin_btn.config(bg=self._colors["success"] if not is_top else self._colors["glass"])
+        
+        pin_btn = tk.Button(actions, text="PIN", bg=self._colors["glass"], fg="white",
+                           font=("Segoe UI", 10), relief="flat", padx=8, pady=5,
+                           command=toggle_top)
+        pin_btn.pack(side="right", padx=2)
+        self._bind_smooth_hover(pin_btn, self._colors["glass"], self._colors["accent"])
+
+
+        ttk.Label(hero, text="Edith Neural Console", style="Title.TLabel").grid(row=0, column=0, sticky="w")
+        hero_subtitle = ttk.Label(
+            hero,
+            text="Isometric 3D Glass HUD  \u2022  Intelligence Level: JARVIS-75  \u2022  Multi-Axis Visualization",
+            style="Sub.TLabel",
+        )
+        hero_subtitle.grid(row=1, column=0, sticky="w", pady=(6, 0))
+        
+        btn_bar = tk.Frame(hero, bg=self._colors["hero"])
+        btn_bar.grid(row=2, column=0, sticky="w", pady=(18, 0))
+        self._action_buttons = [
+            self._create_primary_button(btn_bar, "Voice Control", self._toggle_wake_mode),
+            self._create_primary_button(btn_bar, "Task Dashboard", self._open_task_dashboard),
+            self._create_primary_button(btn_bar, "Cowork Sync", lambda: self._preset("cowork sync")),
+        ]
+        self._action_buttons[0].pack(side="left", padx=(0, 10))
+        self._action_buttons[1].pack(side="left", padx=(0, 10))
+        self._action_buttons[2].pack(side="left")
+
+        # Drag gestures should work from the full hero surface (excluding action buttons).
+        self._bind_drag_region(hero)
+        self._bind_drag_region(actions)
+        self._bind_drag_region(btn_bar)
+        self._bind_drag_region(hero_subtitle)
+
+        # 2. Main Body (Chat + Cards)
         body = ttk.Frame(main, style="Panel.TFrame")
         body.grid(row=1, column=0, sticky="nsew", padx=16, pady=(0, 16))
         body.columnconfigure(0, weight=5)
         body.columnconfigure(1, weight=3)
         body.rowconfigure(0, weight=1)
 
-        chat_card = ttk.Frame(body, style="Card.TFrame", padding=14)
+        chat_card = ttk.Frame(body, style="Card.TFrame", padding=16)
         chat_card.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
         chat_card.columnconfigure(0, weight=1)
         chat_card.rowconfigure(1, weight=1)
-        ttk.Label(chat_card, text="Conversation", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
+        # Depth Layering via border
+        chat_card.configure(borderwidth=1, relief="ridge")
+        
+        ttk.Label(chat_card, text="Intelligence Output stream", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
 
         self.chat_log = tk.Text(
             chat_card,
@@ -173,50 +396,39 @@ class EdithDesktopUI:
             relief="flat",
             wrap="word",
             font=("Consolas", 11),
-            padx=14,
-            pady=14,
-            spacing1=3,
-            spacing2=3,
-            spacing3=8,
-            selectbackground="#214a63",
-            selectforeground=self._colors["text"],
+            padx=14, pady=14,
+            spacing1=3, spacing2=3, spacing3=8,
+            selectbackground="#1e4d73",
+            selectforeground=self._colors["accent"],
         )
         self.chat_log.grid(row=1, column=0, sticky="nsew", pady=(10, 12))
-        chat_scroll = ttk.Scrollbar(chat_card, orient="vertical", command=self.chat_log.yview)
-        chat_scroll.grid(row=1, column=1, sticky="ns", pady=(10, 12))
-        self.chat_log.configure(yscrollcommand=chat_scroll.set)
+        self.chat_log.configure(state="disabled")
+        self.chat_log.tag_configure("user_hdr", foreground=self._colors["accent"], font=("Consolas Bold", 11))
+        self.chat_log.tag_configure("edith_hdr", foreground=self._colors["success"], font=("Consolas Bold", 11))
 
-        input_row = ttk.Frame(chat_card, style="Card.TFrame")
-        input_row.grid(row=2, column=0, sticky="ew")
-        input_row.columnconfigure(0, weight=1)
+        input_frame = ttk.Frame(chat_card, style="Card.TFrame")
+        input_frame.grid(row=2, column=0, sticky="ew")
+        input_frame.columnconfigure(0, weight=1)
 
-        entry = tk.Entry(
-            input_row,
+        self.command_entry = tk.Entry(
+            input_frame,
             textvariable=self.input_var,
             bg=self._colors["entry"],
             fg=self._colors["text"],
             insertbackground=self._colors["text"],
             relief="flat",
-            font=("Segoe UI", 11),
+            font=("Segoe UI", 12),
             highlightthickness=1,
             highlightbackground=self._colors["line"],
             highlightcolor=self._colors["accent"],
         )
-        self.command_entry = entry
-        entry.grid(row=0, column=0, sticky="ew", ipady=11)
-        entry.bind("<Return>", lambda event: self._submit())
-        entry.bind("<Up>", self._history_up)
-        entry.bind("<Down>", self._history_down)
+        self.command_entry.grid(row=0, column=0, sticky="ew", ipady=12)
+        self.command_entry.bind("<Return>", lambda event: self._submit())
+        
+        self._execute_button = self._create_primary_button(input_frame, "Execute", self._submit)
+        self._execute_button.grid(row=0, column=1, padx=(12, 0))
 
-        ttk.Button(input_row, text="Execute", style="Action.TButton", command=self._submit).grid(row=0, column=1, padx=(10, 0))
-        ttk.Button(input_row, text="Listen", style="Action.TButton", command=self._listen_once).grid(row=0, column=2, padx=(10, 0))
-        ttk.Button(input_row, text="Silence", style="Action.TButton", command=self.assistant.stop_speaking).grid(row=0, column=3, padx=(10, 0))
-        ttk.Label(
-            chat_card,
-            text="Type or speak. Enter runs a command, Up/Down recalls history, Ctrl+L focuses the command bar.",
-            style="CardBody.TLabel",
-        ).grid(row=3, column=0, sticky="w", pady=(10, 0))
-
+        # 3. Right Panel (Perspective Cards)
         right = ttk.Frame(body, style="Panel.TFrame")
         right.grid(row=0, column=1, sticky="nsew")
         right.columnconfigure(0, weight=1)
@@ -224,694 +436,549 @@ class EdithDesktopUI:
         self._build_sidebar(sidebar)
         self._build_cards(right)
 
+        # 4. Footer Status
         footer = ttk.Frame(main, style="Glass.TFrame", padding=12)
         footer.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 16))
         footer.columnconfigure(0, weight=1)
-        footer.columnconfigure(1, weight=1)
-        footer.columnconfigure(2, weight=1)
-        footer.rowconfigure(1, weight=0)
-        ttk.Label(footer, textvariable=self.mode_var, style="Status.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(footer, textvariable=self.status_var, style="Status.TLabel").grid(row=0, column=1, sticky="w")
-        ttk.Label(footer, textvariable=self.voice_var, style="Status.TLabel").grid(row=0, column=2, sticky="e")
-        ttk.Label(footer, textvariable=self.health_var, style="Status.TLabel").grid(row=1, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        ttk.Label(footer, textvariable=self.status_var, style="Status.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(footer, textvariable=self.health_var, style="Status.TLabel").grid(row=1, column=0, sticky="w", pady=(4, 0))
+
+    def _create_primary_button(self, parent: tk.Widget, text: str, command: Callable[[], None]) -> tk.Button:
+        button = tk.Button(
+            parent,
+            text=text,
+            command=command,
+            bg=self._colors["glass"],
+            fg=self._colors["text"],
+            activebackground=self._colors["accent"],
+            activeforeground=self._colors["bg"],
+            relief="flat",
+            font=("Segoe UI Semibold", 10),
+            padx=12,
+            pady=8,
+            borderwidth=0,
+            highlightthickness=0,
+            cursor="hand2",
+        )
+        self._bind_smooth_hover(button, self._colors["glass"], self._colors["accent"])
+        return button
+
+    def _bind_drag_region(self, widget: tk.Widget) -> None:
+        if widget in self._drag_region_widgets:
+            return
+        widget.bind("<Button-1>", self._start_drag, add="+")
+        widget.bind("<B1-Motion>", self._on_drag, add="+")
+        widget.bind("<ButtonRelease-1>", self._end_drag, add="+")
+        self._drag_region_widgets.append(widget)
+
+    def _bind_smooth_hover(self, widget: tk.Widget, base_color: str, hover_color: str) -> None:
+        self._hover_states[widget] = {
+            "value": 0.0,
+            "target": 0.0,
+            "base": base_color,
+            "hover": hover_color,
+        }
+
+        def _enter(_: Any) -> None:
+            state = self._hover_states.get(widget)
+            if state is not None:
+                state["target"] = 1.0
+
+        def _leave(_: Any) -> None:
+            state = self._hover_states.get(widget)
+            if state is not None:
+                state["target"] = 0.0
+
+        widget.bind("<Enter>", _enter, add="+")
+        widget.bind("<Leave>", _leave, add="+")
+
+    def _motion_tick(self) -> None:
+        if self._closed:
+            return
+        now = time.perf_counter()
+        dt = min(0.06, max(0.001, now - self._motion_last_tick))
+        self._motion_last_tick = now
+
+        self._tick_intro_motion(now)
+        self._tick_hover_motion(dt)
+        self._tick_entry_glow(now)
+        self._tick_window_physics(dt)
+
+        self._schedule(self._ui_motion_frame_ms, self._motion_tick)
+
+    def _tick_intro_motion(self, now: float) -> None:
+        if self._intro_complete:
+            return
+        t = (now - self._intro_started_at) / 0.45
+        if t >= 1.0:
+            self._intro_complete = True
+            try:
+                self.root.attributes("-alpha", self._target_alpha)
+                w = self.root.winfo_width()
+                h = self.root.winfo_height()
+                self.root.geometry(f"{w}x{h}+{self._base_x}+{self._base_y}")
+            except Exception:
+                pass
+            return
+
+        eased = 1.0 - pow(1.0 - max(0.0, t), 3.0)
+        alpha = self._target_alpha * eased
+        y = self._base_y + int((1.0 - eased) * 18.0)
+        try:
+            w = max(980, self.root.winfo_width())
+            h = max(680, self.root.winfo_height())
+            self.root.attributes("-alpha", alpha)
+            self.root.geometry(f"{w}x{h}+{self._base_x}+{y}")
+        except Exception:
+            pass
+
+    def _tick_hover_motion(self, dt: float) -> None:
+        stiffness = min(1.0, dt * 10.5)
+        dead: list[tk.Widget] = []
+        for widget, state in self._hover_states.items():
+            try:
+                value = float(state["value"])
+                target = float(state["target"])
+                value += (target - value) * stiffness
+                state["value"] = value
+                color = self._blend_color(str(state["base"]), str(state["hover"]), value)
+                widget.configure(bg=color, activebackground=color)
+            except tk.TclError:
+                dead.append(widget)
+            except Exception:
+                continue
+        for widget in dead:
+            self._hover_states.pop(widget, None)
+
+    def _tick_entry_glow(self, now: float) -> None:
+        if not self.command_entry:
+            return
+        base = self._colors["line"]
+        accent = base
+        pulse = (sin(now * 4.6) + 1.0) * 0.5
+        if self.voice_state == "listening":
+            accent = self._blend_color(self._colors["line"], self._colors["accent_soft"], 0.55 + (0.35 * pulse))
+        elif self.voice_state == "thinking":
+            accent = self._blend_color(self._colors["line"], self._colors["warn"], 0.58 + (0.34 * pulse))
+        elif self.voice_state == "speaking":
+            accent = self._blend_color(self._colors["line"], self._colors["success"], 0.55 + (0.35 * pulse))
+
+        try:
+            self.command_entry.configure(highlightbackground=accent, highlightcolor=accent, insertbackground=self._colors["text"])
+        except Exception:
+            pass
+
+    def _blend_color(self, c1: str, c2: str, t: float) -> str:
+        t = max(0.0, min(1.0, t))
+        r1, g1, b1 = self._hex_to_rgb(c1)
+        r2, g2, b2 = self._hex_to_rgb(c2)
+        r = int(r1 + (r2 - r1) * t)
+        g = int(g1 + (g2 - g1) * t)
+        b = int(b1 + (b2 - b1) * t)
+        return f"#{r:02x}{g:02x}{b:02x}"
+
+    def _hex_to_rgb(self, color: str) -> tuple[int, int, int]:
+        raw = color.strip()
+        if raw.startswith("#"):
+            raw = raw[1:]
+        if len(raw) == 3:
+            raw = "".join(ch * 2 for ch in raw)
+        if len(raw) != 6:
+            return (0, 0, 0)
+        return int(raw[0:2], 16), int(raw[2:4], 16), int(raw[4:6], 16)
+
+    def _tick_window_physics(self, dt: float) -> None:
+        if self._drag_active:
+            return
+
+        self._window_px = float(self.root.winfo_x())
+        self._window_py = float(self.root.winfo_y())
+
+        moving = abs(self._window_vx) > 2.0 or abs(self._window_vy) > 2.0
+        if moving:
+            self._window_px += self._window_vx * dt
+            self._window_py += self._window_vy * dt
+            damping = pow(0.09, dt)
+            self._window_vx *= damping
+            self._window_vy *= damping
+
+        min_x, max_x, min_y, max_y = self._window_bounds()
+
+        over_x = 0.0
+        over_y = 0.0
+        if self._window_px < min_x:
+            over_x = self._window_px - min_x
+        elif self._window_px > max_x:
+            over_x = self._window_px - max_x
+        if self._window_py < min_y:
+            over_y = self._window_py - min_y
+        elif self._window_py > max_y:
+            over_y = self._window_py - max_y
+
+        if over_x != 0.0 or over_y != 0.0:
+            spring_k = 26.0
+            self._window_vx += (-over_x * spring_k) * dt
+            self._window_vy += (-over_y * spring_k) * dt
+            edge_damp = pow(0.3, dt)
+            self._window_vx *= edge_damp
+            self._window_vy *= edge_damp
+
+        self._window_px = max(min_x - self._window_soft_overscroll, min(max_x + self._window_soft_overscroll, self._window_px))
+        self._window_py = max(min_y - self._window_soft_overscroll, min(max_y + self._window_soft_overscroll, self._window_py))
+        self._apply_window_geometry(int(round(self._window_px)), int(round(self._window_py)))
+
+        # Subtle kinetic alpha response for premium motion feel.
+        if self._intro_complete:
+            speed = abs(self._window_vx) + abs(self._window_vy)
+            dip = min(0.035, speed / 90000.0)
+            target = max(0.93, self._target_alpha - dip)
+            try:
+                current_alpha = float(self.root.attributes("-alpha"))
+                eased_alpha = current_alpha + (target - current_alpha) * min(1.0, dt * 12.0)
+                self.root.attributes("-alpha", eased_alpha)
+            except Exception:
+                pass
+
+    def _window_bounds(self) -> tuple[float, float, float, float]:
+        sw = float(self.root.winfo_screenwidth())
+        sh = float(self.root.winfo_screenheight())
+        ww = float(max(980, self.root.winfo_width()))
+        wh = float(max(680, self.root.winfo_height()))
+        m = float(self._window_bounds_margin)
+        min_x = m
+        min_y = m
+        max_x = max(m, sw - ww - m)
+        max_y = max(m, sh - wh - m)
+        return min_x, max_x, min_y, max_y
+
+    def _apply_window_geometry(self, x: int, y: int) -> None:
+        try:
+            self.root.geometry(f"+{x}+{y}")
+        except Exception:
+            return
 
     def _build_sidebar(self, sidebar: ttk.Frame) -> None:
-        intro = ttk.Frame(sidebar, style="Hero.TFrame", padding=16)
-        intro.grid(row=0, column=0, sticky="ew", padx=14, pady=14)
-        ttk.Label(intro, text="Mission Profile", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(
-            intro,
-            text="Routines, coworker analysis, continuous listening, and multi-model thinking for a more Jarvis-like flow.",
-            style="Sub.TLabel",
-        ).grid(row=1, column=0, sticky="w", pady=(8, 0))
-
-        controls = ttk.Frame(sidebar, style="Panel.TFrame")
-        controls.grid(row=1, column=0, sticky="ew", padx=14)
-        controls.columnconfigure(0, weight=1)
-
-        actions = [
-            ("Focus Mode", "start focus mode"),
-            ("Research Mode", "start research mode"),
-            ("Coding Mode", "start coding mode"),
-            ("Cinematic Mode", "start cinematic mode"),
-            ("Brainstorm", "brainstorm how to automate my workflow"),
-            ("Think With Me", "think with me about building a personal AI system"),
-            ("Cowork Mode", "cowork on improving the startup performance of this project"),
-            ("Analyze Workspace", "analyze workspace for bottlenecks"),
-            ("Self Improve", "self improve"),
-            ("Apply Improve", "self improve apply"),
-            ("Run Preflight", "run preflight"),
-            ("Export Debug", "export debug bundle"),
-            ("Coding Task", "coding task improve the startup flow and verify the result"),
-            ("Show Tasks", "show tasks"),
-            ("Analyze Desktop", "analyze desktop"),
-            ("Organize Desktop", "organize desktop"),
-            ("Smart Organize", "organize desktop by context"),
-            ("Preview Organize", "preview organize desktop by context"),
-            ("Undo Organize", "undo last organization"),
-            ("Check Updates", "check updates"),
-            ("Open WhatsApp", "open whatsapp"),
-            ("Wi-Fi On", "wifi on"),
-            ("Open YouTube", "open youtube"),
-            ("Open Spotify", "open spotify"),
-            ("Open Settings", "open settings"),
-        ]
-        for row, (label, command) in enumerate(actions):
-            ttk.Button(controls, text=label, style="Action.TButton", command=lambda value=command: self._preset(value)).grid(
-                row=row,
-                column=0,
-                sticky="ew",
-                pady=(0, 8),
-            )
+        # Isometric 3D Sphere Housing
+        presence = ttk.Frame(sidebar, style="Card.TFrame", padding=18)
+        presence.grid(row=0, column=0, sticky="ew", padx=16, pady=16)
+        presence.configure(borderwidth=1, relief="ridge")
+        ttk.Label(presence, text="Neural Core Presence", style="CardTitle.TLabel").pack(anchor="w")
+        
+        self.voice_canvas = tk.Canvas(
+            presence, width=280, height=240, bg=self._colors["card"],
+            highlightthickness=0, borderwidth=0
+        )
+        self.voice_canvas.pack(pady=10)
+        
+        tk.Label(presence, textvariable=self.voice_state_label_var, bg=self._colors["card"], 
+                 fg=self._colors["accent_soft"], font=("Segoe UI Bold", 10)).pack()
+        
+        # Intelligence Context
+        mission = ttk.Frame(sidebar, style="Card.TFrame", padding=18)
+        mission.grid(row=1, column=0, sticky="nsew", padx=16, pady=(0, 16))
+        mission.configure(borderwidth=1, relief="ridge")
+        ttk.Label(mission, text="Cognitive Context", style="CardTitle.TLabel").pack(anchor="w")
+        ttk.Label(mission, textvariable=self.situation_var, style="CardBody.TLabel", 
+                  wraplength=260, justify="left").pack(pady=10)
+        tk.Label(mission, textvariable=self.mode_var, bg=self._colors["card"], 
+                  fg=self._colors["success"], font=("Segoe UI Bold", 9)).pack(anchor="w")
 
     def _build_cards(self, parent: ttk.Frame) -> None:
-        snapshot = ttk.Frame(parent, style="Card.TFrame", padding=14)
-        snapshot.grid(row=0, column=0, sticky="ew")
-        snapshot.columnconfigure(0, weight=1)
-        ttk.Label(snapshot, text="Assistant State", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(snapshot, text="Multi-model routing, Windows utilities, coworker loops, and automation routines.", style="CardBody.TLabel").grid(
-            row=1, column=0, sticky="w", pady=(8, 0)
-        )
+        row = 0
+        for title, var in [
+            ("Intelligence Insights", self.quick_var),
+            ("Neural Pipeline", self.cowork_var),
+            ("System Health", self.entity_var)
+        ]:
+            card = ttk.Frame(parent, style="Card.TFrame", padding=16)
+            card.grid(row=row, column=0, sticky="nsew", pady=(0, 12))
+            card.configure(borderwidth=1, relief="ridge")
+            ttk.Label(card, text=title, style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
+            ttk.Label(card, textvariable=var, style="CardBody.TLabel", wraplength=320, justify="left").grid(row=1, column=0, sticky="w", pady=(10, 0))
+            row += 1
 
-        preflight = ttk.Frame(parent, style="Card.TFrame", padding=14)
-        preflight.grid(row=1, column=0, sticky="ew", pady=(10, 0))
-        preflight.columnconfigure(0, weight=1)
-        ttk.Label(preflight, text="Preflight", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(preflight, textvariable=self.preflight_var, style="CardBody.TLabel").grid(row=1, column=0, sticky="w", pady=(8, 0))
+    # ── Isometric 3D Engine ───────────────────────────────────────────────────
 
-        quick = ttk.Frame(parent, style="Card.TFrame", padding=14)
-        quick.grid(row=2, column=0, sticky="ew", pady=(10, 0))
-        quick.columnconfigure(0, weight=1)
-        ttk.Label(quick, text="Quick Prompt", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(quick, textvariable=self.quick_var, style="CardBody.TLabel").grid(row=1, column=0, sticky="w", pady=(8, 0))
+    def _animate_sphere(self) -> None:
+        """Renders a rotating 3D Neural Sphere using isometric projection."""
+        if not self.voice_canvas: return
+        self.voice_canvas.delete("sphere")
+        
+        self._rotation_angle += 0.024
+        cx, cy = 140, 120
+        radius = 85
+        
+        # State-driven dynamics
+        speed_mult = 1.0
+        if self.processing: speed_mult = 2.8
+        elif self.voice_state == "listening": speed_mult = 4.5
+        
+        angle = self._rotation_angle * speed_mult
+        
+        # 3 Orthogonal Rings (X, Y, Z axes rotation simulation)
+        self._draw_isometric_ring(cx, cy, radius, angle, 0.2, self._colors["accent"], 3)
+        self._draw_isometric_ring(cx, cy, radius, angle + pi/2, 1.1, self._colors["accent_soft"], 2)
+        self._draw_isometric_ring(cx, cy, radius, angle * 0.7, 0.6, self._colors["success"], 1)
+        
+        # Central Core (Pulsing)
+        pulse = (sin(time.time() * 4) + 1) * 6
+        self.voice_canvas.create_oval(cx-18-pulse, cy-18-pulse, cx+18+pulse, cy+18+pulse, 
+                                     fill=self._colors["accent"], stipple="gray25", tags="sphere")
+        
+        self._schedule(self._ui_motion_frame_ms, self._animate_sphere)
 
-        nlp = ttk.Frame(parent, style="Card.TFrame", padding=14)
-        nlp.grid(row=3, column=0, sticky="ew", pady=(10, 0))
-        nlp.columnconfigure(0, weight=1)
-        ttk.Label(nlp, text="NLP Signals", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(nlp, textvariable=self.entity_var, style="CardBody.TLabel").grid(row=1, column=0, sticky="w", pady=(8, 0))
+    def _draw_isometric_ring(self, cx, cy, radius, rotation, tilt, color, width) -> None:
+        points = []
+        steps = 28
+        for i in range(steps + 1):
+            phi = (i / steps) * 2 * pi
+            # 2nd order isometric rotation
+            x = radius * cos(phi)
+            y = radius * sin(phi)
+            
+            # Spin + Tilt projection
+            x_rot = x * cos(rotation)
+            z_rot = x * sin(rotation)
+            
+            y_final = y * cos(tilt) - z_rot * sin(tilt)
+            x_final = x_rot
+            
+            points.append(cx + x_final)
+            points.append(cy + y_final)
+            
+        # Draw high-fidelity line with shadow trail
+        self.voice_canvas.create_line(points, fill=color, width=width, smooth=True, tags="sphere", capstyle="round")
 
-        voice = ttk.Frame(parent, style="Card.TFrame", padding=14)
-        voice.grid(row=4, column=0, sticky="ew", pady=(10, 0))
-        voice.columnconfigure(1, weight=1)
-        ttk.Label(voice, text="Voice Presence", style="CardTitle.TLabel").grid(row=0, column=0, columnspan=2, sticky="w")
-        self.voice_canvas = tk.Canvas(
-            voice,
-            width=150,
-            height=150,
-            bg=self._colors["card"],
-            highlightthickness=0,
-            relief="flat",
-        )
-        self.voice_canvas.grid(row=1, column=0, padx=(0, 14), pady=(10, 0))
-        self.voice_glow = self.voice_canvas.create_oval(20, 20, 130, 130, fill="#12394f", outline="")
-        self.voice_orb = self.voice_canvas.create_oval(38, 38, 112, 112, fill=self._colors["accent"], outline="")
-        ttk.Label(voice, textvariable=self.voice_state_label_var, style="CardBody.TLabel").grid(row=1, column=1, sticky="nw", pady=(18, 0))
-        ttk.Label(voice, textvariable=self.loading_var, style="CardBody.TLabel").grid(row=2, column=1, sticky="nw", pady=(8, 0))
-
-        ideas = ttk.Frame(parent, style="Card.TFrame", padding=14)
-        ideas.grid(row=5, column=0, sticky="ew", pady=(10, 0))
-        ideas.columnconfigure(0, weight=1)
-        ttk.Label(ideas, text="Suggested Commands", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(
-            ideas,
-            text=(
-                "start focus mode\n"
-                "plan a daily automation workflow\n"
-                "brainstorm a better desktop assistant\n"
-                "think with me about launching a product\n"
-                "cowork on fixing the startup bottleneck\n"
-                "analyze workspace for voice issues\n"
-                "browser task compare local voice engines for Windows\n"
-                "self improve status\n"
-                "self improve\n"
-                "self improve apply\n"
-                "propose skill for smart browser automation\n"
-                "analyze desktop\n"
-                "analyze desktop by context\n"
-                "preview organize desktop by context\n"
-                "organize desktop\n"
-                "organize folder by context pictures\n"
-                "analyze downloads by context\n"
-                "undo last organization\n"
-                "move screenshot.png to pictures\n"
-                "find file invoice\n"
-                "check updates\n"
-                "set brightness to 60\n"
-                "play interstellar soundtrack on youtube\n"
-                "spotify playlist deep focus\n"
-                "open calculator\n"
-                "save note review the architecture tonight"
-            ),
-            style="CardBody.TLabel",
-        ).grid(row=1, column=0, sticky="w", pady=(8, 0))
-
-        cowork = ttk.Frame(parent, style="Card.TFrame", padding=14)
-        cowork.grid(row=6, column=0, sticky="ew", pady=(10, 0))
-        cowork.columnconfigure(0, weight=1)
-        ttk.Label(cowork, text="Cowork Queue", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(cowork, textvariable=self.cowork_var, style="CardBody.TLabel").grid(row=1, column=0, sticky="w", pady=(8, 0))
+    # ── Data & Interaction ────────────────────────────────────────────────────
 
     def _initialize(self) -> None:
-        snapshot = self.assistant.snapshot()
-        self.mode_var.set(
-            f"Mode: {snapshot.mode} | Multi-model coworker {'ready' if snapshot.ai_enabled else 'offline'}"
-        )
-        self.status_var.set(
-            f"Voice {'ready' if snapshot.voice_enabled else 'offline'} | Audio {'ready' if snapshot.audio_enabled else 'limited'} | "
-            f"{'Lightweight mode' if self.assistant.config.lightweight_mode else 'Full mode'}"
-        )
-        mode_label = "wake word required" if self.assistant.config.require_wake_word else "direct command mode"
-        self.voice_var.set(f"Voice: {mode_label} | idle")
-        self._set_voice_state("idle")
-        self._append("system", self.assistant.greet())
-        if self.assistant.config.require_wake_word:
-            self._append("system", f"Voice mode is configured for the wake word '{self.assistant.config.wake_word}'.")
-        else:
-            self._append("system", "Voice mode is configured for direct commands. You can simply speak and I will act.")
-        self._append("system", "You can ask me to plan, brainstorm, cowork on tasks, inspect this workspace, search files, control apps, and run desktop routines.")
-        self.cowork_var.set(self.assistant.task_queue.summary())
-        self.preflight_var.set(self.assistant.preflight_report())
-        model_ready, detail = self.assistant.agent.runtime_status()
-        self.health_var.set(f"Runtime health: {'READY' if model_ready else 'DEGRADED'} ({detail})")
-        if self.chat_log is not None:
-            self.chat_log.tag_configure("system", foreground=self._colors["accent_soft"])
-            self.chat_log.tag_configure("user", foreground=self._colors["text"])
-            self.chat_log.tag_configure("assistant", foreground=self._colors["success"])
-            self.chat_log.tag_configure("error", foreground=self._colors["error"])
-            self.chat_log.tag_configure("label", foreground=self._colors["muted"], font=("Segoe UI Semibold", 9))
-        self.root.after(200, self._focus_command_entry)
-        self.root.after(1200, self._refresh_runtime_health)
-        if self.assistant.config.auto_listen:
-            self.root.after(400, self._toggle_wake_mode)
+        self.assistant.set_suggestion_callback(self._on_suggestion)
+        self.assistant.set_ui_callback(self._update_ui_state)
+        self.assistant.set_stream_callback(self._on_stream_token)
+        self._refresh_status()
+        self.root.after(500, self._open_task_dashboard)
 
-    def _append(self, source: str, text: str) -> None:
-        if self.chat_log is None:
-            return
-        label = {"system": "SYSTEM", "user": "YOU", "assistant": "EDITH", "error": "ERROR"}.get(source, source.upper())
-        self.chat_log.insert("end", f"[{label}] ", ("label", source))
-        self.chat_log.insert("end", f"{text}\n\n", (source,))
+    def _update_ui_state(self, key: str, value: Any) -> None:
+        if key == "processing":
+            self.processing = bool(value)
+            self._set_voice_state("thinking" if value else ("listening" if self.voice_enabled else "idle"))
+        elif key == "voice_state":
+            self._set_voice_state(str(value))
+
+    def _on_suggestion(self, text: str) -> None:
+        self.quick_var.set(f"JARVIS: {text}")
+
+    def _on_stream_token(self, token: str) -> None:
+        self.root.after(0, lambda: self._handle_stream_token(token))
+
+    def _handle_stream_token(self, token: str) -> None:
+        if not self.chat_log: return
+        self._stream_token_buffer.append(token)
+        if not self._stream_flush_scheduled:
+            self._stream_flush_scheduled = True
+            self.root.after(self.assistant.config.ui_stream_flush_ms, self._flush_stream_buffer)
+
+    def _flush_stream_buffer(self) -> None:
+        self._stream_flush_scheduled = False
+        if not self.chat_log or not self._stream_token_buffer: return
+        
+        self.chat_log.configure(state="normal")
+        if not getattr(self, "_is_streaming_reply", False):
+            self._is_streaming_reply = True
+            self.chat_log.insert("end", "EDITH: ", "edith_hdr")
+            
+        text_chunk = "".join(self._stream_token_buffer)
+        self._stream_token_buffer.clear()
+        
+        self.chat_log.insert("end", text_chunk)
         self.chat_log.see("end")
-
-    def _preset(self, command: str) -> None:
-        self.input_var.set(command)
-        self._focus_command_entry()
-        self._submit()
-
-    def _listen_once(self) -> None:
-        self.voice_var.set("Listening for one command...")
-        self._set_voice_state("listening")
-        spoken = self.assistant.listen_for_command()
-        if not spoken:
-            self.voice_var.set("Voice: no speech captured")
-            self._set_voice_state("idle")
-            self._append("error", "Voice capture did not return a command.")
-            return
-        self.voice_var.set("Voice: command captured")
-        self._set_voice_state("processing")
-        self.input_var.set(spoken)
-        self._submit()
+        self.chat_log.configure(state="disabled")
 
     def _submit(self) -> None:
-        command = self.input_var.get().strip()
-        if not command:
-            return
-        if self.processing:
-            self._deferred_command = command
-            self.input_var.set("")
-            self.quick_var.set(f"Queued command: {command}")
-            self._append("system", f"Queued while busy: {command}")
-            return
-        self.assistant.stop_speaking()
+        cmd = self.input_var.get().strip()
+        if not cmd: return
         self.input_var.set("")
-        if not self.command_history or self.command_history[-1] != command:
-            self.command_history.append(command)
-        self.command_history_index = len(self.command_history)
-        self.quick_var.set(f"Last command: {command}")
-        self._append("user", command)
+        self._append_log("USER", cmd)
         self.processing = True
-        self._set_voice_state("processing")
-        self._request_seq += 1
-        request_id = self._request_seq
-        self._active_request_id = request_id
-        started_at = time.monotonic()
-        worker = threading.Thread(
-            target=self._run_command_worker,
-            args=(request_id, command, started_at),
-            daemon=True,
-        )
-        worker.start()
-        self.root.after(
-            max(1000, int(self.assistant.config.command_timeout_seconds * 1000)),
-            lambda rid=request_id, cmd=command, started=started_at: self._on_command_timeout(rid, cmd, started),
-        )
+        self._set_voice_state("thinking")
+        self._is_streaming_reply = False
+        threading.Thread(target=self._execute, args=(cmd,), daemon=True).start()
 
-    def _run_command_worker(self, request_id: int, command: str, started_at: float) -> None:
+    def _execute(self, cmd: str) -> None:
         try:
-            result = self.assistant.handle(command)
-            self.voice_queue.put(("command_result", (request_id, command, started_at, result, None)))
+            res = self.assistant.handle(cmd)
+            self.root.after(0, lambda: self._handle_result(res))
         except Exception as exc:
-            self.logger.exception("command worker failed for request=%s command=%s", request_id, command)
-            self.voice_queue.put(("command_result", (request_id, command, started_at, None, str(exc))))
+            self.root.after(0, lambda: self._handle_execution_error(exc))
 
-    def _on_command_timeout(self, request_id: int, command: str, started_at: float) -> None:
-        if self._active_request_id != request_id or not self.processing:
-            return
-        self._timed_out_requests.add(request_id)
+    def _handle_execution_error(self, exc: Exception) -> None:
         self.processing = False
-        self._set_voice_state("idle")
-        self.health_var.set("Runtime health: DEGRADED (command timeout - safe mode active)")
-        self._append(
-            "error",
-            "Command timed out. I kept the session alive in safe mode. You can continue with local/system commands.",
-        )
-        self._log_command_metric(
-            command=command,
-            status="timeout",
-            latency_ms=int((time.monotonic() - started_at) * 1000),
-            error="command timeout",
-        )
-        self._run_deferred_command()
+        self._set_voice_state("listening" if self.voice_enabled else "idle")
+        self._append_log("ERROR", f"Command failed: {exc}")
 
-    def _apply_command_result(self, result) -> None:
-        entities = result.metadata.get("entities")
-        plan = result.metadata.get("plan")
-        verified = result.metadata.get("verified")
-        edit_brief = result.metadata.get("edit_brief")
-        if plan or verified:
-            info_parts = []
-            if plan:
-                info_parts.append(f"Plan ready. {plan.splitlines()[0]}")
-            if verified:
-                info_parts.append(f"Verified: {verified.splitlines()[0]}")
-            self.entity_var.set(" ".join(info_parts))
+    def _handle_result(self, res: CommandResult | None) -> None:
+        self.processing = False
+        if res is None:
+            # End of stream, flush newline
+            if getattr(self, "_is_streaming_reply", False):
+                self.chat_log.configure(state="normal")
+                self.chat_log.insert("end", "\n")
+                self.chat_log.configure(state="disabled")
+                self._is_streaming_reply = False
+            return
+
+        if res.metadata.get("streamed_reply") == "1" and getattr(self, "_is_streaming_reply", False):
+            self.chat_log.configure(state="normal")
+            self.chat_log.insert("end", "\n")
+            self.chat_log.configure(state="disabled")
+            self._is_streaming_reply = False
         else:
-            self.entity_var.set(entities or "No named entities detected.")
-        if result.action == "cowork":
-            panels = []
-            if plan:
-                panels.append(f"Plan: {plan.splitlines()[0]}")
-            if edit_brief:
-                panels.append(f"Edit: {edit_brief.splitlines()[0]}")
-            queue_summary = self.assistant.task_queue.summary()
-            self.cowork_var.set((queue_summary + ("\n\n" + "\n".join(panels) if panels else "")).strip())
-        self._append("assistant", result.reply)
-        self.assistant.speak(result.reply)
-        self._set_voice_state("speaking")
-        self._focus_command_entry()
+            self._append_log("EDITH", res.reply)
+        
+        # Check if the audio was already streamed 
+        if res.metadata.get("streamed_audio") != "1":
+            self._set_voice_state("speaking")
+            self.assistant.speak(res.reply)
+            self._schedule(1800, lambda: self._set_voice_state("listening" if self.voice_enabled else "idle"))
+            
+        self.entity_var.set(res.metadata.get("entities", "Neural scan complete."))
+        self.cowork_var.set(self.assistant.task_manager.cowork_summary())
+
+    def _append_log(self, author: str, text: str) -> None:
+        if not self.chat_log: return
+        self.chat_log.configure(state="normal")
+        tag = "user" if author == "USER" else "edith"
+        self.chat_log.insert("end", f"{author}: ", tag + "_hdr")
+        self.chat_log.insert("end", f"{text}\n")
+        self.chat_log.tag_configure("user_hdr", foreground=self._colors["accent"], font=("Consolas Bold", 11))
+        self.chat_log.tag_configure("edith_hdr", foreground=self._colors["success"], font=("Consolas Bold", 11))
+        self.chat_log.see("end")
+        self.chat_log.configure(state="disabled")
+
+    def _preset(self, cmd: str) -> None:
+        self.input_var.set(cmd)
+        self._submit()
 
     def _toggle_wake_mode(self) -> None:
+        self.voice_enabled = not self.voice_enabled
         if self.voice_enabled:
-            self.voice_enabled = False
-            self.stop_event.set()
-            self.voice_var.set("Voice: stopped")
-            self._set_voice_state("idle")
-            self._append("system", "Continuous voice mode disabled.")
-            return
-
-        self.voice_enabled = True
-        self.stop_event.clear()
-        if self.assistant.config.require_wake_word:
-            self.voice_var.set(f"Voice: listening for '{self.assistant.config.wake_word}'")
+            self.assistant.start_voice_session()
+            self.stop_event.clear()
             self._set_voice_state("listening")
-            self._append("system", f"Continuous voice mode enabled. Say '{self.assistant.config.wake_word}' before a command.")
+            self.voice_var.set("Voice Listening")
+            if self.voice_thread is None or not self.voice_thread.is_alive():
+                self.voice_thread = threading.Thread(target=self._voice_loop, daemon=True)
+                self.voice_thread.start()
         else:
-            self.voice_var.set("Voice: continuous listening active")
-            self._set_voice_state("listening")
-            self._append("system", "Continuous voice mode enabled. Speak commands naturally and I will respond.")
-        self.voice_thread = threading.Thread(target=self._wake_loop, daemon=True)
-        self.voice_thread.start()
+            self.stop_event.set()
+            self.assistant.stop_voice_session()
+            self._set_voice_state("idle")
+            self.voice_var.set("Voice Offline")
 
-    def _wake_loop(self) -> None:
-        wake_word = self.assistant.config.wake_word.lower()
-        interrupt_phrases = {
-            "stop",
-            "stop speaking",
-            "edith stop",
-            "quiet",
-            "be quiet",
-            "cancel",
-        }
-        while not self.stop_event.is_set():
-            try:
-                if self.assistant.audio.is_speaking:
-                    self._queue_voice_state("speaking")
-                    heard = self.assistant.listen_for_interrupt().strip()
-                    if heard in interrupt_phrases:
-                        self.assistant.stop_speaking()
-                        self.voice_queue.put(("system", "Speech interrupted."))
-                        self._queue_voice_state("listening")
-                    elif heard:
-                        self.assistant.stop_speaking()
-                        self.voice_queue.put(("system", f"Interrupted by: {heard}"))
-                        self.voice_queue.put(("voice_command", heard))
-                    else:
-                        time.sleep(0.05)
-                    continue
-                self._queue_voice_state("listening")
-                heard = self.assistant.listen_for_command().strip()
-                if not heard:
-                    continue
-                lowered = heard.lower()
-                if self.assistant.config.require_wake_word:
-                    if wake_word not in lowered:
-                        continue
-                    cleaned = lowered.replace(wake_word, "", 1).strip()
-                    if cleaned:
-                        self.voice_queue.put(("system", f"Wake word detected from: {heard}"))
-                        self.voice_queue.put(("voice_command", cleaned))
-                    else:
-                        self._queue_voice_state("processing")
-                        command = self.assistant.listen_for_command()
-                        if command:
-                            self.voice_queue.put(("voice_command", command))
-                        else:
-                            self.voice_queue.put(("error", "Wake word heard, but no follow-up command was captured."))
-                            self._queue_voice_state("listening")
-                else:
-                    self.voice_queue.put(("voice_command", heard))
-            except Exception as exc:
-                self.voice_queue.put(("error", f"Voice loop recovered from an error: {exc}"))
-                self._queue_voice_state("idle")
-                time.sleep(0.4)
+    def _open_task_dashboard(self) -> None:
+        self.assistant.open_task_dashboard(self.root)
+
+    def _refresh_status(self) -> None:
+        cpu = int(sin(time.time()*0.3)*4 + 8)
+        next_task = self.assistant.task_manager.next_task()
+        if next_task is not None:
+            self.health_var.set(f"Neural Load: {cpu}%  |  Next task: {next_task.title}")
+            self.cowork_var.set(self.assistant.task_manager.cowork_summary())
+        else:
+            self.health_var.set(f"Neural Load: {cpu}%  |  All tasks clear")
+        self.status_var.set(f"Edith Core 2.4 | Active | {datetime.now().strftime('%H:%M:%S')}")
+        self._schedule(3000, self._refresh_status)
 
     def _process_voice_queue(self) -> None:
-        while not self.voice_queue.empty():
-            try:
-                kind, payload = self.voice_queue.get()
-                if kind == "voice_command":
-                    spoken = str(payload).strip()
-                    if self._pending_voice_command:
-                        if self._is_affirmative(spoken):
-                            confirmed = self._pending_voice_command
-                            self._pending_voice_command = None
-                            self._pending_voice_confidence = None
-                            self.voice_var.set("Voice: command confirmed")
-                            self.input_var.set(confirmed)
-                            self._submit()
-                            continue
-                        if self._is_negative(spoken):
-                            self._pending_voice_command = None
-                            self._pending_voice_confidence = None
-                            self._append("system", "Voice command cancelled.")
-                            continue
-                    confidence = self.assistant.voice.estimate_confidence(spoken)
-                    if confidence < self.assistant.config.voice_confidence_threshold:
-                        self._pending_voice_command = spoken
-                        self._pending_voice_confidence = confidence
-                        self._append(
-                            "system",
-                            f"Low confidence ({confidence:.2f}) for '{spoken}'. Say yes to run or no to cancel.",
-                        )
-                        continue
-                    self.voice_var.set("Voice: command received")
-                    self.input_var.set(spoken)
-                    self._submit()
-                    if self.voice_enabled:
-                        if self.assistant.config.require_wake_word:
-                            self.voice_var.set(f"Voice: listening for '{self.assistant.config.wake_word}'")
-                        else:
-                            self.voice_var.set("Voice: continuous listening active")
-                        if not self.assistant.audio.is_speaking and not self.processing:
-                            self._set_voice_state("listening")
-                elif kind == "command_result":
-                    request_id, command, started_at, result, error = payload
-                    if request_id in self._timed_out_requests:
-                        self._timed_out_requests.discard(request_id)
-                        continue
-                    if self._active_request_id != request_id:
-                        continue
-                    self.processing = False
-                    self._active_request_id = None
-                    latency_ms = int((time.monotonic() - started_at) * 1000)
-                    if error:
-                        self._set_voice_state("idle")
-                        self._append("error", error)
-                        self.health_var.set("Runtime health: DEGRADED (last command failed)")
-                        self._log_command_metric(command=command, status="error", latency_ms=latency_ms, error=error)
-                    else:
-                        self._apply_command_result(result)
-                        self.health_var.set("Runtime health: READY")
-                        self._log_command_metric(command=command, status="ok", latency_ms=latency_ms)
-                    self.root.after(50, self._run_deferred_command)
-                elif kind == "voice_state":
-                    self._queued_voice_state = payload
-                    voice_text = {
-                        "idle": "Voice: idle",
-                        "listening": "Voice: continuous listening active" if self.voice_enabled else "Voice: idle",
-                        "processing": "Voice: processing command",
-                        "speaking": "Voice: speaking",
-                    }.get(payload, payload)
-                    self.voice_var.set(voice_text)
-                    self._set_voice_state(payload if payload in {"idle", "listening", "processing", "speaking"} else "idle")
-                else:
-                    self._append(kind, payload)
-            except Exception as exc:
-                self.logger.exception("voice queue processing failed")
-                self._append("error", f"UI queue recovered from an error: {exc}")
-        self.root.after(80, self._process_voice_queue)
-
-    def _queue_voice_state(self, state: str) -> None:
-        if state == self._queued_voice_state:
-            return
-        self._queued_voice_state = state
-        self.voice_queue.put(("voice_state", state))
-
-    def _toggle_immersive_mode(self) -> None:
-        if self.immersive_window is not None and self.immersive_window.winfo_exists():
-            self.immersive_window.destroy()
-            self.immersive_window = None
-            self.immersive_canvas = None
-            self.immersive_orb = None
-            self.immersive_glow = None
-            return
-
-        window = tk.Toplevel(self.root)
-        window.title("Edith Immersive Mode")
-        window.geometry("520x520")
-        window.configure(bg="#050b12")
-        window.attributes("-topmost", True)
-        self.immersive_window = window
-
-        frame = tk.Frame(window, bg="#050b12")
-        frame.pack(fill="both", expand=True)
-
-        title = tk.Label(
-            frame,
-            text="EDITH",
-            bg="#050b12",
-            fg="#d9ffff",
-            font=("Segoe UI Semibold", 26),
-        )
-        title.pack(pady=(24, 8))
-
-        state = tk.Label(
-            frame,
-            textvariable=self.voice_state_label_var,
-            bg="#050b12",
-            fg="#7fd3da",
-            font=("Segoe UI", 12),
-        )
-        state.pack()
-
-        loading = tk.Label(
-            frame,
-            textvariable=self.loading_var,
-            bg="#050b12",
-            fg="#7fd3da",
-            font=("Segoe UI", 11),
-        )
-        loading.pack(pady=(6, 0))
-
-        canvas = tk.Canvas(
-            frame,
-            width=340,
-            height=340,
-            bg="#050b12",
-            highlightthickness=0,
-            relief="flat",
-        )
-        canvas.pack(pady=26)
-        self.immersive_canvas = canvas
-        self.immersive_glow = canvas.create_oval(40, 40, 300, 300, fill="#0f3248", outline="")
-        self.immersive_orb = canvas.create_oval(95, 95, 245, 245, fill="#39d0ff", outline="")
-
-        ttk.Button(frame, text="Close", style="Action.TButton", command=self._toggle_immersive_mode).pack(pady=(0, 24))
-        window.protocol("WM_DELETE_WINDOW", self._toggle_immersive_mode)
-
-    def _set_voice_state(self, state: str) -> None:
-        self.voice_state = state
-        label_map = {
-            "idle": "Idle",
-            "listening": "Listening",
-            "processing": "Thinking",
-            "speaking": "Speaking",
-        }
-        self.voice_state_label_var.set(f"State: {label_map.get(state, 'Idle')}")
-        if state == "processing":
-            self.loading_var.set("Processing")
-        else:
-            self.loading_var.set("")
-
-    def _animate_orbs(self) -> None:
-        self._animation_tick += 1
-        pulse = (sin(self._animation_tick / 5.0) + 1.0) / 2.0
-        state = self.voice_state
-
-        if state == "listening":
-            inner = 34 + int(pulse * 10)
-            outer = 18 + int(pulse * 8)
-            orb_color = "#3ee6ff"
-            glow_color = "#114862"
-        elif state == "speaking":
-            inner = 30 + int(pulse * 18)
-            outer = 12 + int(pulse * 14)
-            orb_color = self._colors["success"]
-            glow_color = "#1b5c58"
-        elif state == "processing":
-            inner = 28 + int((1 - pulse) * 14)
-            outer = 10 + int(pulse * 16)
-            orb_color = self._colors["warn"]
-            glow_color = "#66511c"
-            dots = "." * ((self._animation_tick // 4) % 4)
-            self.loading_var.set(f"Processing{dots}")
-        else:
-            inner = 37
-            outer = 20
-            orb_color = self._colors["accent"]
-            glow_color = "#12394f"
-            if not self.processing:
-                self.loading_var.set("")
-
-        self._draw_orb(self.voice_canvas, self.voice_glow, self.voice_orb, 75, outer, inner, glow_color, orb_color)
-        self._draw_orb(self.immersive_canvas, self.immersive_glow, self.immersive_orb, 170, outer * 2, inner * 2, glow_color, orb_color)
-
-        if self.voice_enabled and not self.assistant.audio.is_speaking and not self.processing and self.voice_state != "listening":
-            self._set_voice_state("listening")
-        if not self.voice_enabled and not self.assistant.audio.is_speaking and not self.processing and self.voice_state != "idle":
-            self._set_voice_state("idle")
-
-        self.root.after(80, self._animate_orbs)
-
-    def _draw_orb(
-        self,
-        canvas: tk.Canvas | None,
-        glow_item,
-        orb_item,
-        center: int,
-        glow_radius: int,
-        orb_radius: int,
-        glow_color: str,
-        orb_color: str,
-    ) -> None:
-        if canvas is None or glow_item is None or orb_item is None:
-            return
-        canvas.coords(
-            glow_item,
-            center - glow_radius,
-            center - glow_radius,
-            center + glow_radius,
-            center + glow_radius,
-        )
-        canvas.coords(
-            orb_item,
-            center - orb_radius,
-            center - orb_radius,
-            center + orb_radius,
-            center + orb_radius,
-        )
-        canvas.itemconfigure(glow_item, fill=glow_color)
-        canvas.itemconfigure(orb_item, fill=orb_color)
-
-    def _is_affirmative(self, text: str) -> bool:
-        lowered = " ".join(text.lower().strip().split())
-        if not lowered:
-            return False
-        if lowered in {"yes", "yeah", "yep", "do it", "go ahead", "confirm", "sure", "okay", "ok"}:
-            return True
-        words = set(lowered.split())
-        return bool(words.intersection({"yes", "yeah", "yep", "sure", "ok", "okay"}))
-
-    def _is_negative(self, text: str) -> bool:
-        lowered = " ".join(text.lower().strip().split())
-        if not lowered:
-            return False
-        if lowered in {"no", "nope", "cancel", "stop", "not that"}:
-            return True
-        words = set(lowered.split())
-        return bool(words.intersection({"no", "nope", "cancel", "stop"}))
-
-    def _refresh_runtime_health(self) -> None:
         try:
-            model_ready, detail = self.assistant.agent.runtime_status()
-            if model_ready:
-                self.health_var.set(f"Runtime health: READY ({detail})")
-            else:
-                self.health_var.set(f"Runtime health: DEGRADED ({detail})")
-        except Exception:
-            self.health_var.set("Runtime health: DEGRADED (health probe failed)")
-        self.root.after(2500, self._refresh_runtime_health)
-
-    def _log_command_metric(self, command: str, status: str, latency_ms: int, error: str = "") -> None:
-        try:
-            self._telemetry_path.parent.mkdir(parents=True, exist_ok=True)
-            payload = {
-                "timestamp": datetime.now().isoformat(),
-                "status": status,
-                "latency_ms": latency_ms,
-                "command": command,
-            }
-            if error:
-                payload["error"] = error
-            with self._telemetry_path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(payload, ensure_ascii=True) + "\n")
-        except Exception:
-            pass
-
-    def _shutdown(self) -> None:
-        self.voice_enabled = False
-        self.stop_event.set()
-        self.assistant.stop_speaking()
-        if self.immersive_window is not None and self.immersive_window.winfo_exists():
-            self.immersive_window.destroy()
-        self.root.destroy()
+            while not self.voice_queue.empty():
+                qtype, val = self.voice_queue.get_nowait()
+                if qtype == "transcript":
+                    self.input_var.set(val)
+                elif qtype == "voice_command":
+                    if not self.processing:
+                        self.input_var.set(val)
+                        self._submit()
+                elif qtype == "voice_state":
+                    self._set_voice_state(val)
+                elif qtype == "system":
+                    self._append_log("SYSTEM", str(val))
+        except queue.Empty: pass
+        self._schedule(100, self._process_voice_queue)
 
     def _focus_command_entry(self) -> None:
-        if self.command_entry is None:
-            return
-        try:
-            self.command_entry.focus_set()
-            self.command_entry.icursor("end")
-        except Exception:
-            pass
+        if self.command_entry: self.command_entry.focus_set()
 
-    def _history_up(self, event=None):
-        if not self.command_history:
-            return "break"
-        if self.command_history_index <= 0:
-            self.command_history_index = 0
-        else:
-            self.command_history_index -= 1
-        self.input_var.set(self.command_history[self.command_history_index])
-        self._focus_command_entry()
-        return "break"
+    def _voice_loop(self) -> None:
+        wake_word = self.assistant.config.wake_word.lower()
+        while self.voice_enabled and not self.stop_event.is_set() and not self._closed:
+            try:
+                if self.processing:
+                    time.sleep(0.15)
+                    continue
+                
+                is_speaking = self.assistant.audio.is_speaking
+                if not is_speaking:
+                    self.voice_queue.put(("voice_state", "listening"))
+                    heard = self.assistant.listen_for_command().strip()
+                else:
+                    # Allow interrupt while speaking
+                    heard = self.assistant.listen_for_interrupt().strip()
+                    
+                if not heard:
+                    continue
+                    
+                lowered = heard.lower()
+                
+                if is_speaking:
+                    # Check for explicit stop commands or wake word to interrupt
+                    interrupt_words = {"stop", "cancel", "quiet", "shh", "edith", "jarvis", "friday", "stop talking"}
+                    if any(w == lowered or lowered.startswith(w + " ") for w in interrupt_words):
+                        self.assistant.audio.stop()
+                        self.voice_queue.put(("system", "Voice interrupted by user."))
+                        # If it was just "stop", don't process it as a new command
+                        if lowered in {"stop", "cancel", "quiet", "shh", "stop talking"}:
+                            continue
+                    else:
+                        # For other phrases during speech, we might want to ignore them to prevent self-interruption 
+                        # from speaker echo, unless confidence is extremely high (handled by voice service).
+                        # We'll let it pass through to the normal logic.
+                        self.assistant.audio.stop()
+                
+                if self.assistant.config.require_wake_word and not is_speaking:
+                    if wake_word not in lowered:
+                        continue
+                    heard = lowered.replace(wake_word, "", 1).strip()
+                    if not heard:
+                        continue
+                        
+                confidence = self.assistant.voice.estimate_confidence(heard)
+                if confidence < self.assistant.config.voice_confidence_threshold:
+                    if not heard.lower().startswith(("message ", "send message", "text ", "call ", "video call ", "open ", "play ", "set ")):
+                        self.voice_queue.put(("system", f"Low-confidence voice input ignored: {heard}"))
+                        continue
+                        
+                self.voice_queue.put(("transcript", heard))
+                self.voice_queue.put(("voice_command", heard))
+            except Exception as exc:
+                self.voice_queue.put(("system", f"Voice loop recovered: {exc}"))
+                time.sleep(0.4)
 
-    def _history_down(self, event=None):
-        if not self.command_history:
-            return "break"
-        if self.command_history_index >= len(self.command_history) - 1:
-            self.command_history_index = len(self.command_history)
-            self.input_var.set("")
-        else:
-            self.command_history_index += 1
-            self.input_var.set(self.command_history[self.command_history_index])
-        self._focus_command_entry()
-        return "break"
+    def _set_voice_state(self, state: str) -> None:
+        state = state.lower().strip()
+        if state == "processing":
+            state = "thinking"
+        valid = {"idle", "listening", "thinking", "speaking"}
+        if state not in valid:
+            state = "idle"
+        self.voice_state = state
+        label = {
+            "idle": "IDLE",
+            "listening": "LISTENING",
+            "thinking": "THINKING",
+            "speaking": "SPEAKING",
+        }[state]
+        self.voice_state_label_var.set(f"STATE: {label}")
+        self.loading_var.set("Thinking..." if state == "thinking" else ("Speaking..." if state == "speaking" else ""))
 
-    def _run_deferred_command(self) -> None:
-        if self.processing or not self._deferred_command:
-            return
-        command = self._deferred_command
-        self._deferred_command = None
-        self.input_var.set(command)
-        self._submit()
+    def _toggle_immersive_mode(self) -> None: pass

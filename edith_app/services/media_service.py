@@ -92,6 +92,13 @@ class MediaService:
         webbrowser.open(url)
         return f"Opening {label}."
 
+    def search_amazon(self, query: str, domain: str = "in") -> str:
+        encoded = urllib.parse.quote_plus(query)
+        suffix = "in" if domain.lower() == "in" else "com"
+        webbrowser.open(f"https://www.amazon.{suffix}/s?k={encoded}")
+        label = "Amazon India" if suffix == "in" else "Amazon"
+        return f"Searching {label} for {query}."
+
     def _open_spotify_uri(self, uri: str) -> bool:
         try:
             subprocess.Popen(f'start "" "{uri}"', shell=True)

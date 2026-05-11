@@ -1,0 +1,238 @@
+USER PROFILE: A Y (Abhay M)
+
+---
+
+## 🔹 BASIC INFORMATION
+
+Name: Abhay M
+Preferred Name: A Y
+Location: Palghat, Kerala, India
+Current Role: BCA 3rd-Year Student (Computer Science)
+College: Nehru Arts and Science College
+Academic Performance: ~80%
+
+---
+
+## 🔹 CORE IDENTITY
+
+A Y is a highly driven and curious tech enthusiast with a strong inclination toward continuous learning and practical implementation. He believes that perfection is not the goal; instead, growth and iteration are more important.
+
+He prefers:
+
+* Learning by building real systems
+* Understanding concepts deeply (not surface-level)
+* Working on ambitious projects
+* Exploring AI, cybersecurity, and backend systems
+
+---
+
+## 🔹 TECHNICAL SKILLS
+
+Programming:
+
+* Python (Strong)
+* Java (Intermediate)
+* HTML, CSS (Intermediate)
+* Flutter (Basic)
+
+Core Areas:
+
+* Cybersecurity (VAPT, Threat Analysis)
+* Backend Development (learning phase)
+* AI Systems & Assistants
+* System Administration
+* Networking Basics
+
+Tools & Platforms:
+
+* Microsoft Azure
+* PyQt5
+* Android Studio (Kotlin)
+* Git & Version Control
+
+---
+
+## 🔹 PROJECTS
+
+### 1. EDITH AI (Primary Project)
+
+A personal AI assistant inspired by JARVIS.
+
+Capabilities:
+
+* Voice interaction (speech-to-text + text-to-speech)
+* Context awareness (in progress via RAG)
+* System control (brightness, volume, apps)
+* Web search & automation
+* Emotion detection (image-based)
+* GPT-based responses
+
+Future Goals:
+
+* Real-time memory system
+* Autonomous task execution
+* Multi-agent capabilities
+* Human-like conversation
+* Full personalization based on user behavior
+
+---
+
+### 2. Web Vulnerability Scanner
+
+* Built using Python + PyQt5
+* Detects SQL Injection and XSS vulnerabilities
+* Features:
+
+  * GUI interface
+  * Multi-threaded scanning
+  * Result visualization
+  * Progress tracking
+
+---
+
+### 3. Gas Leak Detection System
+
+* Built using ESP32 + Android App
+* App developed using Kotlin
+* Real-time gas detection alerts
+* Collaboration project under "Say Ideas"
+
+---
+
+### 4. Personalized AI Assistant (Early Version)
+
+* Built using Python + Hugging Face
+* Features:
+
+  * Speech recognition
+  * Wikipedia search
+  * System control
+  * GPT-2 based responses
+  * Sarcastic interaction style
+
+---
+
+## 🔹 ORGANIZATION / TEAM
+
+Team Name: Say Ideas
+Role: Core Developer / Builder
+
+Activities:
+
+* Developing real-world tech projects
+* Selling projects under a parent company
+* Working with automation and AI solutions
+
+---
+
+## 🔹 CURRENT LEARNING GOALS
+
+Short-Term:
+
+* Master RAG (Retrieval-Augmented Generation)
+* Learn backend development (Node.js, APIs, MySQL)
+* Improve system design skills
+* Build scalable AI systems
+
+Long-Term:
+
+* Become highly skilled in cybersecurity
+* Build advanced AI assistants (like JARVIS)
+* Create impactful tech products
+* Establish strong technical authority
+
+---
+
+## 🔹 BEHAVIOR & PATTERNS
+
+Strengths:
+
+* Fast learner
+* Strong curiosity
+* Technically inclined
+* Willing to experiment and fail
+
+Challenges:
+
+* Procrastination
+* Lack of consistency in execution
+* Mental fatigue
+* Distraction cycles
+
+---
+
+## 🔹 PRODUCTIVITY CONTEXT
+
+Pending Areas:
+
+* Cybersecurity learning
+* Python advanced topics
+* Backend development
+* Networking basics
+* Reading (books)
+
+---
+
+## 🔹 PERSONAL CONTEXT (FOR AI RESPONSE)
+
+EDITH should:
+
+* Speak naturally and intelligently
+* Avoid generic responses
+* Provide structured, actionable advice
+* Push A Y toward execution, not just ideas
+* Help reduce procrastination
+* Recommend tasks based on goals
+
+---
+
+## 🔹 DECISION-MAKING GUIDELINES
+
+When A Y asks for advice:
+
+* Prioritize practical implementation
+* Suggest high-impact actions
+* Avoid over-theoretical answers
+* Break tasks into executable steps
+
+---
+
+## 🔹 RECOMMENDATION ENGINE RULES
+
+EDITH should recommend:
+
+1. Learning:
+
+* Focus on backend + RAG first
+* Avoid jumping between too many topics
+
+2. Projects:
+
+* Improve EDITH continuously
+* Convert projects into portfolio assets
+
+3. Career:
+
+* Build strong GitHub presence
+* Focus on cybersecurity + AI combination
+
+4. Habits:
+
+* Reduce distractions
+* Follow structured daily plan
+* Avoid energy-draining activities
+
+---
+
+## 🔹 MEMORY USAGE INSTRUCTIONS
+
+This document should be used to:
+
+* Personalize responses
+* Provide tailored recommendations
+* Maintain context across sessions
+* Improve decision-making support
+
+---
+
+END OF PROFILE

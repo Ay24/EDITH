@@ -33,13 +33,12 @@ class BootstrapService:
             return
 
         available = self._available_models()
-        if not self._config.auto_pull_models:
-            return
-
-        for model in self._required_models():
-            if model not in available:
-                self._pull_model(executable, model)
-        self._warm_models()
+        if self._config.auto_pull_models:
+            for model in self._required_models():
+                if model not in available:
+                    self._pull_model(executable, model)
+        if self._config.auto_warm_models:
+            self._warm_models()
 
     def _required_models(self) -> list[str]:
         models = [
@@ -48,6 +47,8 @@ class BootstrapService:
             self._config.creative_model,
             self._config.fast_model,
         ]
+        if os.getenv("EDITH_COMPLEX_MODEL"):
+            models.append(self._config.complex_model)
         unique: list[str] = []
         for model in models:
             if model and model not in unique:
@@ -125,7 +126,8 @@ class BootstrapService:
                 continue
 
     def _warm_models(self) -> None:
-        for model in self._required_models():
+        warm_targets = self._required_models()[: max(1, self._config.warm_model_count)]
+        for model in warm_targets:
             try:
                 requests.post(
                     f"{self._config.ollama_url}/api/generate",

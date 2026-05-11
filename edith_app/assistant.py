@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import collections
 import json
 import re
 import subprocess
@@ -20,15 +21,20 @@ from edith_app.services.agent_service import AgentService
 from edith_app.services.audio_service import AudioService
 from edith_app.services.connectivity_service import ConnectivityService
 from edith_app.services.knowledge_service import KnowledgeService
-from edith_app.services.logging_service import get_logger
+from edith_app.services.logging_service import get_logger, RunLogger
 from edith_app.services.media_service import MediaService
 from edith_app.services.memory_service import MemoryService
 from edith_app.services.notes_service import NotesService
+from edith_app.services.app_control_service import AppControlService
+from edith_app.services.browser_control_service import BrowserControlService, BrowserPurchasePlan
+from edith_app.services.desktop_automation_service import DesktopAutomationService
 from edith_app.services.self_improve_service import SelfImproveService
 from edith_app.services.system_service import SystemService
 from edith_app.services.vision_service import VisionService
 from edith_app.services.voice_service import VoiceService
 from edith_app.services.whatsapp_service import WhatsAppService
+from edith_app.services.rag_service import RagService
+from edith_app.core.neural_router import NeuralRouter
 
 try:
     import phonenumbers
@@ -41,9 +47,11 @@ class EdithAssistant:
         self.config = config
         self.history: list[ChatMessage] = []
         self.logger = get_logger("edith.assistant", config.runtime_log_path)
+        self.run_logger = RunLogger(str(config.project_root / "edith_runs"))
         self.agent = AgentService(config)
         self.audio = AudioService()
         self.voice = VoiceService(config)
+        self.voice.on_interrupt = self.audio.stop
         self.connectivity = ConnectivityService()
         self.knowledge = KnowledgeService(
             user_agent=f"{config.persona.name}/3.0 desktop assistant",
@@ -54,6 +62,7 @@ class EdithAssistant:
         self.session_memory = SessionMemory(config.session_memory_path)
         self.task_queue = TaskQueue(config.cowork_tasks_path)
         self.notes = NotesService(config.notes_path)
+        self.app_control = AppControlService()
         self.self_improve = SelfImproveService(
             project_root=str(config.project_root),
             telemetry_path=config.telemetry_path,
@@ -62,6 +71,8 @@ class EdithAssistant:
         )
         self.vision = VisionService(config)
         self.system = SystemService(self.vision, config.organization_manifest_path)
+        self.desktop_automation = DesktopAutomationService(self.system)
+        self.browser_control = BrowserControlService(self.system)
         self.whatsapp = WhatsAppService()
         self.cowork = AgentLoop(
             self.agent,
@@ -71,7 +82,58 @@ class EdithAssistant:
         self._pending_suggestion: str | None = None
         self._pending_message_contact: str | None = None
         self._pending_organization: tuple[str, bool] | None = None
+        self._pending_whatsapp_draft: tuple[str, str] | None = None  # (contact, drafted_message)
+        self._pending_browser_purchase: BrowserPurchasePlan | None = None
+        self._pending_browser_summary_approved: bool = False
         self._suggestion_cooldown_turns = 0
+        self._stream_callback: Any | None = None
+        self._short_term_context: collections.deque[dict[str, str]] = collections.deque(maxlen=8)
+        self.rag = RagService(config)
+        self.neural_router = NeuralRouter(config, self.agent, self.rag, self.whatsapp)
+
+    def set_stream_callback(self, callback: Any) -> None:
+        """Register a UI token callback for real-time streaming display."""
+        self._stream_callback = callback
+
+    def set_suggestion_callback(self, callback: Any) -> None:
+        self._suggestion_callback = callback
+
+    def set_ui_callback(self, callback: Any) -> None:
+        self._ui_callback = callback
+
+    def start_voice_session(self) -> None:
+        try:
+            self.voice.start_session()
+        except Exception:
+            self.logger.debug("voice start_session failed", exc_info=True)
+
+    def stop_voice_session(self) -> None:
+        try:
+            self.voice.stop_session()
+        except Exception:
+            self.logger.debug("voice stop_session failed", exc_info=True)
+
+    def open_task_dashboard(self, root: Any) -> None:
+        try:
+            from edith_app.ui_dashboard import TaskDashboardUI
+            if not hasattr(self, '_dashboard_ui') or not self._dashboard_ui.is_open():
+                self._dashboard_ui = TaskDashboardUI(root, self.task_queue)
+            else:
+                self._dashboard_ui.window.lift()
+        except Exception as e:
+            self.logger.error(f"Failed to open task dashboard: {e}")
+
+    @property
+    def task_manager(self) -> Any:
+        # Provide an adapter for the UI's task_manager expectations
+        class _TaskMgrAdapter:
+            def __init__(self, tq):
+                self.tq = tq
+            def cowork_summary(self):
+                return self.tq.summary()
+            def next_task(self):
+                return self.tq.next_task()
+        return _TaskMgrAdapter(self.task_queue)
 
     def snapshot(self) -> AssistantSnapshot:
         return AssistantSnapshot(
@@ -108,15 +170,96 @@ class EdithAssistant:
         return self.voice.listen_for_interrupt()
 
     def handle(self, command: str) -> CommandResult:
+        result = self._handle_internal(command)
+        if hasattr(self, 'run_logger'):
+            self.run_logger.log_interaction(command, result.reply, result.action)
+        return result
+
+    def _handle_internal(self, command: str) -> CommandResult:
         command = command.strip()
         lowered = command.lower()
         self._remember("user", command)
         self.logger.info("handle command: %s", lowered[:180])
 
+        # ── WhatsApp draft confirmation flow ─────────────────────────────────
+        if self._pending_whatsapp_draft and lowered in {"yes", "yes send it", "send it", "go ahead", "confirm"}:
+            contact, draft = self._pending_whatsapp_draft
+            self._pending_whatsapp_draft = None
+            sent = self.whatsapp.send_message(contact, draft)
+            result = CommandResult(sent, action="message")
+            self._remember("assistant", result.reply)
+            return result
+
+        if self._pending_whatsapp_draft and lowered in {"no", "cancel", "nope", "don't send"}:
+            self._pending_whatsapp_draft = None
+            result = CommandResult("Draft discarded. Let me know if you want to try again.", action="message")
+            self._remember("assistant", result.reply)
+            return result
+        
+        elif self.rag.available and ("remember that " in lowered or "my name is " in lowered or "my favorite " in lowered or "i like " in lowered or "i prefer " in lowered):
+            # Strict Fact Extraction: Only explicit user facts are routed to RAG memory.
+            fact = lowered.replace("remember that ", "").strip()
+            stored = self.rag.store_user_fact(fact)
+            if stored:
+                result = CommandResult("I've stored that in my long-term memory.", action="memory")
+            else:
+                result = CommandResult("I couldn't write that to my knowledge base right now.", action="memory")
+            self._remember("assistant", result.reply)
+            return result
+
+        if self._pending_whatsapp_draft and lowered not in {
+            "yes", "yes send it", "send it", "go ahead", "confirm", "no", "cancel", "nope"
+        }:
+            self._pending_whatsapp_draft = None
+
+        if self._pending_browser_purchase and lowered in {
+            "approve summary",
+            "summary approved",
+            "yes summary",
+            "looks good",
+        }:
+            self._pending_browser_summary_approved = True
+            result = CommandResult(
+                "Summary approved. Say 'confirm place order' when you want me to execute the final checkout step.",
+                action="browser",
+            )
+            self._remember("assistant", result.reply)
+            return result
+
+        if self._pending_browser_purchase and lowered in {
+            "confirm place order",
+            "place order",
+            "confirm buy",
+            "buy now",
+            "yes place order",
+        }:
+            if not self._pending_browser_summary_approved:
+                summary = self.browser_control.summarize_purchase_plan(self._pending_browser_purchase)
+                result = CommandResult(
+                    f"{summary}\n\nMandatory step: say 'approve summary' before 'confirm place order'.",
+                    action="browser",
+                )
+                self._remember("assistant", result.reply)
+                return result
+            plan = self._pending_browser_purchase
+            self._pending_browser_purchase = None
+            self._pending_browser_summary_approved = False
+            reply = self.browser_control.confirm_place_order(plan)
+            result = CommandResult(reply, action="browser")
+            self._remember("assistant", result.reply)
+            return result
+
+        if self._pending_browser_purchase and lowered in {"cancel order", "cancel purchase", "stop purchase", "no"}:
+            self._pending_browser_purchase = None
+            self._pending_browser_summary_approved = False
+            result = CommandResult("Okay, I cancelled the pending purchase flow.", action="browser")
+            self._remember("assistant", result.reply)
+            return result
+
         if lowered in {"yes", "yes do it", "do it", "go ahead"} and self._pending_suggestion:
             replay_command = self._pending_suggestion
             self._pending_suggestion = None
-            return self.handle(replay_command)
+            return self._handle_internal(replay_command)
 
         if lowered in {"yes", "yes do it", "do it", "go ahead", "apply", "confirm"} and self._pending_organization:
             target, by_context = self._pending_organization
@@ -157,9 +300,77 @@ class EdithAssistant:
         if self._pending_organization and lowered not in {"yes", "yes do it", "do it", "go ahead", "apply", "confirm", "no", "nope", "cancel", "not that"}:
             self._pending_organization = None
 
+        if self._is_pending_tasks_query(lowered):
+            result = CommandResult(self.task_queue.summary(), action="cowork")
+            self._remember("assistant", result.reply)
+            return result
+
+        if self._is_profile_query(lowered):
+            result = CommandResult(self._profile_summary(), action="memory")
+            self._remember("assistant", result.reply)
+            return result
+
+        # ── RAG / Knowledge-base triggers ─────────────────────────────────────
+        _RAG_PREFIXES = (
+            "ask docs ", "search knowledge base ", "from my documents ",
+            "from the knowledge base ", "look in my knowledge base ",
+            "search docs for ", "look up in docs ", "docs: ",
+            "knowledge base: ", "search my notes for ", "from docs ",
+        )
+        for _rp in _RAG_PREFIXES:
+            if lowered.startswith(_rp):
+                question = command[len(_rp):].strip()
+                if question:
+                    rag_reply = self.rag.ask_docs(question, on_token=self._stream_callback)
+                    result = CommandResult(rag_reply, action="knowledge", metadata={"source": "rag"})
+                    result.reply = self._polish_reply(result.reply, result.action)
+                    self._remember("assistant", result.reply)
+                    self._update_short_term_context(command, result.reply)
+                    return result
+
+        if lowered in {"knowledge base status", "rag status", "kb status"}:
+            s = self.rag.stats()
+            reply = (
+                f"RAG KB: {s.get('doc_chunks', 0)} doc chunks, "
+                f"{s.get('memory_entries', 0)} memory entries. "
+                f"Status: {'ready' if self.rag.available else 'unavailable'}."
+            )
+            result = CommandResult(reply, action="status")
+            self._remember("assistant", result.reply)
+            return result
+
+        # ── WhatsApp draft-reply trigger ─────────────────────────────────────
+        _draft_match = re.match(r"(?:draft a? ?reply to|reply to|draft reply for)\s+(.+)", lowered)
+        if _draft_match:
+            _contact = _draft_match.group(1).strip()
+            draft_result = self._draft_whatsapp_reply(_contact)
+            self._remember("assistant", draft_result.reply)
+            return draft_result
+
         compound_reply = self._try_handle_compound_command(command)
         if compound_reply is not None:
             result = CommandResult(compound_reply, action="routine")
+            result.reply = self._polish_reply(result.reply, result.action)
+            self._remember("assistant", result.reply)
+            return result
+
+        in_app_reply = self._try_handle_in_app_action(command)
+        if in_app_reply is not None:
+            result = CommandResult(in_app_reply, action="system")
+            result.reply = self._polish_reply(result.reply, result.action)
+            self._remember("assistant", result.reply)
+            return result
+
+        dynamic_desktop_reply = self._try_handle_dynamic_desktop_task(command)
+        if dynamic_desktop_reply is not None:
+            result = CommandResult(dynamic_desktop_reply, action="files")
+            result.reply = self._polish_reply(result.reply, result.action)
+            self._remember("assistant", result.reply)
+            return result
+
+        browser_control_reply = self._try_handle_browser_control_task(command)
+        if browser_control_reply is not None:
+            result = CommandResult(browser_control_reply, action="browser")
             result.reply = self._polish_reply(result.reply, result.action)
             self._remember("assistant", result.reply)
             return result
@@ -195,11 +406,15 @@ class EdithAssistant:
             goal = command[len("browser task "):].strip()
             run = self.cowork.run(goal, self._context_history(), mode="browser")
             result = CommandResult(run.reply, action="cowork", metadata={"plan": run.plan, "verified": run.summary, "edit_brief": run.edit_brief})
-        elif lowered.startswith("queue task "):
-            title = command[len("queue task "):].strip()
+        elif lowered.startswith("queue task ") or lowered.startswith("add task ") or lowered.startswith("create task ") or lowered.startswith("add a new task ") or lowered.startswith("add new task "):
+            title = lowered.replace("queue task ", "").replace("add a new task ", "").replace("add new task ", "").replace("add task ", "").replace("create task ", "").strip()
             task = self.task_queue.add(title)
             result = CommandResult(f"Queued cowork task: {task.title}.", action="cowork")
         elif lowered in {"show tasks", "show cowork tasks", "list tasks", "task list"}:
+            result = CommandResult(self.task_queue.summary(), action="cowork")
+        elif lowered in {"what are my pending tasks", "pending tasks", "remaining tasks", "what are my remaining tasks", "task dashboard"}:
+            result = CommandResult(self.task_queue.summary(), action="cowork")
+        elif lowered in {"what is next", "what's next", "whats next"}:
             result = CommandResult(self.task_queue.summary(), action="cowork")
         elif lowered in {"next task", "next cowork task"}:
             task = self.task_queue.next_task()
@@ -227,18 +442,18 @@ class EdithAssistant:
             result = CommandResult(self.media.launch_youtube_mix("trending cinematic music"), action="youtube")
         elif "youtube mix" in lowered:
             query = self._strip_words(lowered, ["youtube mix", "for"])
-            result = CommandResult(self.media.launch_youtube_mix(query or "focus music"), action="youtube")
-        elif "play" in lowered and "on youtube" in lowered:
-            query = lowered.replace("play", "", 1).replace("on youtube", "", 1).strip()
-            result = CommandResult(self.media.search_youtube(query or "music"), action="youtube")
-        elif lowered.startswith("play "):
-            query = lowered.replace("play", "", 1).strip()
-            result = CommandResult(self.media.search_youtube(query or "music"), action="youtube")
+            result = CommandResult(self.media.launch_youtube_mix(query), action="youtube")
         elif lowered.startswith("open spotify"):
             result = CommandResult(self.media.open_spotify(), action="spotify")
         elif "play" in lowered and "on spotify" in lowered:
             query = lowered.replace("play", "", 1).replace("on spotify", "", 1).strip()
             result = CommandResult(self.media.play_spotify(query or "music"), action="spotify")
+        elif "play" in lowered and "on youtube" in lowered:
+            query = lowered.replace("play", "", 1).replace("on youtube", "", 1).strip()
+            result = CommandResult(self.media.search_youtube(query), action="youtube")
+        elif lowered.startswith("play ") and lowered.replace("play", "", 1).strip() not in {"that", "it", "this", "something", "the video", "the audio"}:
+            query = lowered.replace("play", "", 1).strip()
+            result = CommandResult(self.media.search_youtube(query), action="youtube")
         elif lowered.startswith("spotify search"):
             query = self._strip_words(lowered, ["spotify search"])
             result = CommandResult(self.media.search_spotify(query or "cinematic soundtrack"), action="spotify")
@@ -296,7 +511,7 @@ class EdithAssistant:
             result = CommandResult(self._send_whatsapp_message(command), action="message")
         elif self._is_message_contact_only_command(lowered):
             result = CommandResult(self._start_pending_message(command), action="message")
-        elif lowered in {"read my whatsapp messages", "read my messages", "read whatsapp messages"}:
+        elif lowered in {"read my whatsapp messages", "read my messages", "read whatsapp messages", "whatsapp read", "read chat"}:
             result = CommandResult(self.whatsapp.read_current_chat(), action="message")
         elif lowered.startswith("open folder "):
             target = command[len("open folder "):].strip()
@@ -329,9 +544,9 @@ class EdithAssistant:
             result = CommandResult(self.system.preview_organization("downloads", by_context=False), action="files")
         elif lowered in {"preview organize downloads by context", "preview downloads context organization"}:
             result = CommandResult(self.system.preview_organization("downloads", by_context=True), action="files")
-        elif lowered in {"organize desktop", "clean desktop", "declutter desktop", "sort desktop files"}:
+        elif lowered in {"organize desktop", "clean desktop", "declutter desktop", "sort desktop files", "organise desktop", "clean up desktop"}:
             result = CommandResult(self._queue_organization("desktop", by_context=False), action="files")
-        elif lowered in {"organize downloads", "clean downloads", "declutter downloads"}:
+        elif lowered in {"organize downloads", "clean downloads", "declutter downloads", "organise downloads", "organise download", "organize download", "clean up downloads"}:
             result = CommandResult(self._queue_organization("downloads", by_context=False), action="files")
         elif lowered in {"organize desktop by context", "context organize desktop", "smart organize desktop"}:
             result = CommandResult(self._queue_organization("desktop", by_context=True), action="files")
@@ -525,19 +740,23 @@ class EdithAssistant:
                 result.reply = self._polish_reply(result.reply, result.action)
                 self._remember("assistant", result.reply)
                 return result
-            if self._should_try_model_intent(lowered):
-                intent_result = self._try_model_tool_intent(command)
-                if intent_result is not None:
-                    intent_result.reply = self._polish_reply(intent_result.reply, intent_result.action)
-                    self._remember("assistant", intent_result.reply)
-                    return intent_result
             entities = self._safe_extract_entities(command)
             reply = self._safe_agent_reply(command)
             metadata = {"entities": ", ".join(entities)} if entities else {}
+            if self._stream_callback:
+                metadata["streamed_reply"] = "1"
+            if self.audio.tts_enabled:
+                metadata["streamed_audio"] = "1"
             result = CommandResult(reply=reply, action="agent", metadata=metadata)
 
+        result.reply = self._apply_persona_voice(result.reply, result.action, command)
         result.reply = self._polish_reply(result.reply, result.action)
         self._remember("assistant", result.reply)
+        self._update_short_term_context(command, result.reply)
+        # Auto-store quality interactions into RAG memory
+        if self._should_store_interaction(command, result) and self._is_worthy_of_rag(command, result.reply):
+            summary = f"User: {command}\nEDITH: {result.reply}"
+            self.rag.ingest_text(summary, source_name="voice_chat")
         if self._should_store_interaction(command, result):
             self.memory.remember(command, result.reply, result.action)
         if self._suggestion_cooldown_turns > 0:
@@ -550,17 +769,93 @@ class EdithAssistant:
         except Exception:
             return []
 
+
+    def _capture_and_describe_screen(self) -> str:
+        try:
+            from PIL import ImageGrab
+            import tempfile
+            import os
+            fd, path = tempfile.mkstemp(suffix=".png")
+            os.close(fd)
+            img = ImageGrab.grab()
+            img.save(path)
+            prompt = "What is currently visible on the user's screen? Be concise but detailed about any code, text, or applications."
+            description = self.vision.describe_image(Path(path), prompt=prompt)
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+            return description
+        except ImportError:
+            self.logger.warning("Pillow not installed. Cannot grab screen.")
+            return ""
+        except Exception as e:
+            self.logger.warning(f"Screen capture failed: {e}")
+            return ""
+
     def _safe_agent_reply(self, command: str) -> str:
+        """Stream LLM tokens to the UI and TTS engine simultaneously."""
         try:
             lowered = command.lower().strip()
-            if len(lowered.split()) <= 7:
-                reply = self.agent.quick_think(
-                    "Respond as a natural desktop assistant in 1-2 short sentences. "
-                    f"User message: {command}",
-                    self._context_history(),
-                )
-            else:
-                reply = self.agent.reply(self._contextualize_prompt(command), self._context_history())
+            word_count = len(lowered.split())
+            prefer_fast = word_count <= 7
+
+            vision_context = ""
+            vision_triggers = ["screen", "look at", "see this", "what am i looking at"]
+            if any(trig in lowered for trig in vision_triggers) and self.vision.enabled:
+                self.logger.info("Live Screen Vision triggered.")
+                desc = self._capture_and_describe_screen()
+                if desc:
+                    vision_context = f"[Live Screen Context: {desc}]\n\n"
+
+            speech_buffer: list[str] = []
+            audio_active = self.audio.tts_enabled
+            self._voice_state_sent = False
+
+            if audio_active:
+                self.audio.clear_queue()
+
+            def _on_token(token: str) -> None:
+                # Push token to UI
+                if self._stream_callback:
+                    self._stream_callback(token)
+                
+                # Update UI state to speaking on first token if TTS is enabled
+                if getattr(self, "_voice_state_sent", False) is False and audio_active:
+                    if hasattr(self, "_ui_callback") and self._ui_callback:
+                        self._ui_callback("voice_state", "speaking")
+                    self._voice_state_sent = True
+
+                # Buffer for sentence-level TTS chunking
+                if audio_active:
+                    speech_buffer.append(token)
+                    text_so_far = "".join(speech_buffer)
+                    if text_so_far.endswith((". ", "? ", "! ", ".\n", "?\n", "!\n", ", ")):
+                        sentence = text_so_far.strip()
+                        if sentence:
+                            self.audio.speak_queued(sentence)
+                        speech_buffer.clear()
+
+            context_kwargs = self._build_dynamic_context()
+            specialist_instruction = (
+                "You are EDITH. Respond in short, complete sentences. "
+                "Be direct, proactive, and natural — never verbose."
+            )
+
+            # JARVIS Neural Brain Integration
+            # Instead of a basic LLM generation, we give the prompt to the autonomous tool loop.
+            reply = self.neural_router.process(
+                user_prompt=command,
+                vision_context=vision_context,
+                on_token=_on_token
+            )
+
+            # Flush any remaining partial sentence
+            if audio_active and speech_buffer:
+                tail = "".join(speech_buffer).strip()
+                if tail:
+                    self.audio.speak_queued(tail)
+
             return self._sanitize_model_output(reply)
         except Exception:
             self.logger.exception("safe agent reply failed")
@@ -580,7 +875,7 @@ class EdithAssistant:
             "Confidence should be between 0.0 and 1.0.\n"
             f"User request: {command}"
         )
-        raw = self.agent.parse_intent(prompt, self._context_history())
+        raw = self.agent.parse_intent(prompt, self._context_history(), prefer_fast=True)
         parsed = self._extract_json_object(raw)
         if parsed is None:
             return None
@@ -758,11 +1053,17 @@ class EdithAssistant:
             "could",
             "can",
             "help",
+            "whatsapp",
+            "message",
+            "text",
+            "call",
         }
         return any(token in guidance_tokens for token in words)
 
     def _should_try_model_intent_first(self, lowered: str) -> bool:
         if not lowered:
+            return False
+        if self._is_pending_tasks_query(lowered):
             return False
         words = lowered.split()
         if len(words) < 3:
@@ -791,6 +1092,9 @@ class EdithAssistant:
             "open google",
             "open stack",
             "open whatsapp",
+            "whatsapp ",
+            "whatsapp read",
+            "read chat",
             "open settings",
             "wifi ",
             "bluetooth ",
@@ -895,6 +1199,77 @@ class EdithAssistant:
                 return f"Searching Amazon for {query}."
             return self._search_files_or_web(query)
         return None
+
+    def _try_handle_in_app_action(self, command: str) -> str | None:
+        lowered = command.lower().strip()
+        if not lowered:
+            return None
+        if not (
+            lowered.startswith(("open ", "start ", "join ", "schedule ", "mute", "unmute", "end ", "leave ", "raise "))
+            or " in teams" in lowered
+            or " in zoom" in lowered
+            or "new meeting" in lowered
+            or "start meeting" in lowered
+        ):
+            return None
+        if not self.app_control.can_handle(command):
+            return None
+        reply = self.app_control.execute(command)
+        if not reply:
+            return None
+        # Allow normal routing to continue when the app-action parser couldn't map a shortcut.
+        if reply.lower().startswith("i know ") and "don't have a shortcut" in reply.lower():
+            return None
+        return reply
+
+    def _try_handle_dynamic_desktop_task(self, command: str) -> str | None:
+        if not self.desktop_automation.can_handle(command):
+            return None
+        try:
+            reply = self.desktop_automation.execute(
+                command,
+                parse_with_model=self._parse_dynamic_desktop_task_with_model,
+            )
+            return reply or None
+        except Exception:
+            self.logger.exception("dynamic desktop task failed")
+            return None
+
+    def _parse_dynamic_desktop_task_with_model(self, command: str) -> dict[str, Any] | None:
+        model_ready, _ = self.agent.runtime_status()
+        if not model_ready:
+            return None
+        prompt = (
+            "Extract desktop file automation intent as JSON only.\n"
+            "Schema:\n"
+            '{"app":"","filename":"","extension":"","content":"","target_dir":"","use_gui":true,"confidence":0.0}\n'
+            "Rules:\n"
+            "- app: app name if user requested one (notepad, wps, file explorer, vscode).\n"
+            "- filename: base file name without extension when possible.\n"
+            "- extension: preferred extension (e.g. .txt, .py, .md).\n"
+            "- content: exact text user asked to type/write.\n"
+            "- target_dir: desktop/downloads/documents or explicit path.\n"
+            "- confidence: 0.0 to 1.0.\n"
+            f"User request: {command}"
+        )
+        raw = self.agent.parse_intent(prompt, self._context_history(), prefer_fast=True)
+        parsed = self._extract_json_object(raw)
+        if parsed is None:
+            return None
+        return parsed
+
+    def _try_handle_browser_control_task(self, command: str) -> str | None:
+        if not self.browser_control.can_handle(command):
+            return None
+        try:
+            reply, purchase_plan = self.browser_control.execute(command)
+        except Exception:
+            self.logger.exception("browser control task failed")
+            return None
+        if purchase_plan is not None:
+            self._pending_browser_purchase = purchase_plan
+            self._pending_browser_summary_approved = False
+        return reply or None
 
     def _infer_site(self, target: str) -> str | None:
         lowered = target.lower().strip()
@@ -1110,6 +1485,28 @@ class EdithAssistant:
             remembered_messages.append(ChatMessage(source="assistant", text=f"Remembered user request: {item.command}"))
             remembered_messages.append(ChatMessage(source="assistant", text=f"Remembered reply: {item.reply}"))
         return (remembered_messages + history)[-14:]
+
+    def _build_dynamic_context(self) -> dict[str, str]:
+        """Build a runtime context dict injected into every LLM call."""
+        memory_lines = [f"- {item.command}: {item.reply}" for item in self.memory.recent(limit=3)]
+        memory_context = "\n".join(memory_lines) if memory_lines else "No recent long-term memories."
+        last_topic = "None"
+        if self.history:
+            last_topic = self.history[-1].text[:60]
+        last_action = "None"
+        if len(self.history) >= 2:
+            last_action = self.history[-2].text[:60]
+        current_task = "None"
+        pending = self.task_queue.next_task()
+        if pending:
+            current_task = pending.title
+        return {
+            "recent_memory": memory_context,
+            "last_topic": last_topic,
+            "last_action": last_action,
+            "current_task": current_task,
+            "recent_turns": self._short_term_context_block(),
+        }
 
     def _queue_organization(self, target: str, by_context: bool) -> str:
         preview = self.system.preview_organization(target, by_context=by_context)
@@ -1375,6 +1772,10 @@ class EdithAssistant:
         lowered = command.lower().strip()
         if not lowered:
             return False
+        if self._is_pending_tasks_query(lowered):
+            return False
+        if self._is_profile_query(lowered):
+            return False
         if self._suggestion_cooldown_turns > 0:
             return False
         if len(lowered) < 18:
@@ -1402,6 +1803,59 @@ class EdithAssistant:
             "sleep pc",
         )
         return not lowered.startswith(prefixes)
+
+    def _is_pending_tasks_query(self, lowered: str) -> bool:
+        text = " ".join(lowered.strip().split())
+        if text in {
+            "show tasks",
+            "show cowork tasks",
+            "list tasks",
+            "task list",
+            "pending tasks",
+            "remaining tasks",
+            "what are my pending tasks",
+            "what are my remaining tasks",
+            "task dashboard",
+            "what is next",
+            "what's next",
+            "whats next",
+            "next task",
+            "next cowork task",
+        }:
+            return True
+        pending_like = re.search(r"\bpend\w*\s+tas\w*\b", text) is not None
+        remaining_like = ("remaining" in text and "task" in text)
+        if pending_like or remaining_like:
+            return True
+        if text.startswith("what are my pending tas") or text.startswith("whata re my pending task"):
+            return True
+        return False
+
+    def _is_profile_query(self, lowered: str) -> bool:
+        text = " ".join(lowered.strip().split())
+        patterns = (
+            "what do you know about me",
+            "so what you know about me",
+            "what you know about me",
+            "what do u know about me",
+            "what do you remember about me",
+            "what do you remember",
+            "tell me about me",
+        )
+        return any(pat in text for pat in patterns)
+
+    def _profile_summary(self) -> str:
+        remembered = self.memory.recent(limit=8, include_actions={"note", "memory", "cowork", "files", "message"})
+        if not remembered:
+            return "I only know what you've told me in this assistant. Right now I don't have saved personal facts to report."
+        recent_commands = [item.command for item in remembered if item.command.strip()]
+        if not recent_commands:
+            return "I only know what you've told me in this assistant. I don't have clear saved personal facts yet."
+        compact = "; ".join(recent_commands[:4])
+        return (
+            "I only know what you've shared in this local session and memory. "
+            f"Recent items I can reference: {compact}."
+        )
 
     def _looks_incomplete(self, text: str) -> bool:
         incomplete_endings = (
@@ -1502,3 +1956,112 @@ class EdithAssistant:
             self.media.search_spotify("cinematic orchestral playlist"),
         ]
         return "Cinematic mode activated. " + " ".join(actions)
+
+    # ── Short-term context ring buffer ────────────────────────────────────────
+
+    def _update_short_term_context(self, user_input: str, assistant_reply: str) -> None:
+        """Push the latest turn into the short-term ring buffer (maxlen=8)."""
+        self._short_term_context.append({"user": user_input, "edith": assistant_reply})
+
+    def _short_term_context_block(self) -> str:
+        """Return a formatted string of the last N turns for prompt injection."""
+        if not self._short_term_context:
+            return "No recent conversation turns."
+        lines = []
+        for i, turn in enumerate(self._short_term_context, 1):
+            lines.append(f"- Turn {i}: User: \"{turn['user'][:80]}\" → EDITH: \"{turn['edith'][:120]}\"")
+        return "\n".join(lines)
+
+    # ── JARVIS persona voice filter ───────────────────────────────────────────
+
+    _JARVIS_FILLER_OPENERS = re.compile(
+        r"^(?:certainly[!,.]?\s*|absolutely[!,.]?\s*|of course[!,.]?\s*|sure thing[!,.]?\s*"
+        r"|sure[!,.]?\s*|great question[!,.]?\s*|that['']s a great question[!,.]?\s*"
+        r"|i['']d be happy to[!,.]?\s*|happy to help[!,.]?\s*|let me help you[!,.]?\s*"
+        r"|of course[,!]?\s*|understood[,!]?\s*|noted[,!]?\s*|roger that[,!]?\s*"
+        r"|right away[,!]?\s*|on it[,!]?\s*|got it[,!]?\s*)",
+        re.IGNORECASE,
+    )
+
+    def _strip_jarvis_filler(self, text: str) -> str:
+        """Remove generic verbal filler that breaks the JARVIS persona."""
+        cleaned = self._JARVIS_FILLER_OPENERS.sub("", text).strip()
+        # Capitalise first letter after stripping
+        if cleaned and not cleaned[0].isupper():
+            cleaned = cleaned[0].upper() + cleaned[1:]
+        # Remove "As an AI / as a large language model" hedging
+        cleaned = re.sub(
+            r"\b(?:as an AI|as an artificial intelligence|as a language model|as a large language model)\b",
+            "as your assistant",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        return cleaned or text
+
+    def _apply_persona_voice(self, text: str, action: str, command: str = "") -> str:
+        """Apply JARVIS-style persona filter to any LLM output."""
+        if not text:
+            return text
+        if action in {"audio", "system", "files", "clock", "updates", "status", "message", "cowork"}:
+            return text
+        return self._strip_jarvis_filler(text)
+
+    # ── WhatsApp style-clone draft reply ─────────────────────────────────────
+
+    def _draft_whatsapp_reply(self, contact: str) -> CommandResult:
+        """Read the current WhatsApp chat, analyse the user's style, draft a reply."""
+        resolved = self._resolve_whatsapp_name(contact)
+        try:
+            chat_text = self.whatsapp.read_current_chat()
+        except Exception:
+            chat_text = ""
+        if not chat_text:
+            return CommandResult(
+                f"I couldn't read the current WhatsApp chat. Open the conversation with {resolved} first.",
+                action="message",
+            )
+        prompt = (
+            f"You are analysing a WhatsApp chat. The user's name is the owner of this phone.\n"
+            f"Read the following chat history and draft a natural reply that matches the user's "
+            f"writing style (tone, length, punctuation, emoji usage).\n\n"
+            f"Chat:\n{chat_text[:3000]}\n\n"
+            f"Return ONLY the draft message text, nothing else."
+        )
+        try:
+            draft = self.agent.quick_think(prompt, self._context_history())
+            draft = draft.strip().strip('"').strip("'")
+        except Exception:
+            return CommandResult("I couldn't generate a draft reply right now.", action="message")
+
+        self._pending_whatsapp_draft = (resolved, draft)
+        return CommandResult(
+            f"Draft ready for {resolved}:\n\n\"{draft}\"\n\nSay 'yes' to send or 'no' to discard.",
+            action="message",
+        )
+
+    # ── RAG quality filter ────────────────────────────────────────────────────
+
+    def _is_worthy_of_rag(self, command: str, reply: str) -> bool:
+        """Return True if this interaction is worth storing in the RAG knowledge base."""
+        if len(command.split()) < 6 or len(reply.split()) < 8:
+            return False
+        noise_markers = (
+            "i hit a temporary model issue",
+            "please try that once more",
+            "i couldn't",
+            "i can't",
+            "i cannot",
+            "tell me what",
+            "no speech captured",
+        )
+        reply_lower = reply.lower()
+        if any(m in reply_lower for m in noise_markers):
+            return False
+        command_noise_prefixes = (
+            "set volume", "check updates", "lock pc", "sleep pc",
+            "wifi on", "wifi off", "bluetooth",
+        )
+        lowered_cmd = command.lower().strip()
+        if any(lowered_cmd.startswith(p) for p in command_noise_prefixes):
+            return False
+        return True

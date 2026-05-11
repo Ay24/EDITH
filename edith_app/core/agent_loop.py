@@ -3,12 +3,14 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from edith_app.core.neural_engine import NeuralEngine
 from edith_app.core.planner import CoworkPlanner
 from edith_app.core.session_memory import SessionMemory
 from edith_app.core.tool_registry import ToolObservation, ToolRegistry
 from edith_app.core.verifier import CoworkVerifier
 from edith_app.models import ChatMessage
 from edith_app.services.agent_service import AgentService
+from edith_app.services.execution_engine import ExecutionEngine, ExecutionTask
 
 
 @dataclass(slots=True)
@@ -20,12 +22,14 @@ class CoworkRun:
 
 
 class AgentLoop:
-    def __init__(self, agent: AgentService, tools: ToolRegistry, memory: SessionMemory) -> None:
+    def __init__(self, agent: AgentService, tools: ToolRegistry, memory: SessionMemory, engine: NeuralEngine | None = None) -> None:
         self._agent = agent
         self._tools = tools
         self._memory = memory
+        self._engine = engine
         self._planner = CoworkPlanner(agent)
         self._verifier = CoworkVerifier()
+        self._executor = ExecutionEngine(max_workers=3)
 
     def run(self, goal: str, history: list[ChatMessage], mode: str = "cowork") -> CoworkRun:
         related = [
@@ -52,10 +56,19 @@ class AgentLoop:
         return CoworkRun(reply=reply, plan=plan, summary=summary, edit_brief=edit_brief)
 
     def _execute(self, goal: str, mode: str) -> list[ToolObservation]:
-        observations: list[ToolObservation] = [self._tools.workspace_snapshot(), self._tools.project_summary()]
+        profile = self._engine.analyze(goal, mode_hint=mode) if self._engine is not None else None
+        observations: list[ToolObservation] = self._executor.run_batch([
+            ExecutionTask("workspace_snapshot", lambda: self._tools.workspace_snapshot()),
+            ExecutionTask(
+                "project_summary",
+                lambda: self._tools.project_summary(),
+            ),
+        ])
+        if mode not in {"workspace", "coding", "edit"} and profile is not None and profile.complexity == "simple":
+            observations = [item for item in observations if item.name != "project_summary"]
         lowered = goal.lower()
 
-        if mode in {"workspace", "coding", "cowork"}:
+        if mode in {"workspace", "coding"} or (profile is not None and profile.run_compile_check):
             observations.append(self._tools.run_compile_check())
 
         needles = self._extract_needles(goal)
@@ -69,15 +82,20 @@ class AgentLoop:
             needles.append("volume")
 
         seen: set[str] = set()
-        for needle in needles:
+        budget = profile.observation_budget if profile is not None else 8
+        for needle in needles[:budget]:
             if needle in seen:
                 continue
             seen.add(needle)
-            observations.append(self._tools.search_text(needle))
-            observations.append(self._tools.search_filenames(needle))
+            observations.extend(
+                self._executor.run_batch([
+                    ExecutionTask(f"search_text:{needle}", lambda needle=needle: self._tools.search_text(needle)),
+                    ExecutionTask(f"search_filenames:{needle}", lambda needle=needle: self._tools.search_filenames(needle)),
+                ])
+            )
 
         file_candidates = self._extract_paths(goal)
-        for relative_path in file_candidates[:2]:
+        for relative_path in file_candidates[: max(1, min(3, budget // 3))]:
             observations.append(self._tools.read_file(relative_path))
 
         if mode == "browser":
@@ -101,6 +119,8 @@ class AgentLoop:
         return self._agent.plan(prompt, history)
 
     def _extract_needles(self, goal: str) -> list[str]:
+        if self._engine is not None:
+            return self._engine.extract_keywords(goal, limit=5)
         quoted = re.findall(r"['\"]([^'\"]+)['\"]", goal)
         if quoted:
             return [item.strip() for item in quoted if item.strip()]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from collections import deque
 from pathlib import Path
 import hashlib
 import json
@@ -39,11 +40,14 @@ class SystemService:
         self._manifest_path = Path(organization_manifest_path) if organization_manifest_path else Path("data") / "edith_last_organization.json"
         self._special_folders = {
             "downloads": self._known_folder("Downloads", self._home / "Downloads"),
+            "download": self._known_folder("Downloads", self._home / "Downloads"),
             "documents": self._known_folder("MyDocuments", self._home / "Documents"),
+            "document": self._known_folder("MyDocuments", self._home / "Documents"),
             "desktop": self._known_folder("Desktop", self._home / "Desktop"),
             "pictures": self._known_folder("MyPictures", self._home / "Pictures"),
             "music": self._known_folder("MyMusic", self._home / "Music"),
             "videos": self._known_folder("MyVideos", self._home / "Videos"),
+            "system32": Path(os.environ.get("WINDIR", r"C:\Windows")) / "System32",
         }
         self._search_roots = [
             self._special_folders["desktop"],
@@ -57,7 +61,33 @@ class SystemService:
             "cmd": "cmd.exe", "powershell": "powershell.exe", "explorer": "explorer.exe", "file explorer": "explorer.exe",
             "settings": "start ms-settings:", "task manager": "taskmgr.exe", "control panel": "control.exe", "whatsapp": "start whatsapp:",
             "chrome": "chrome.exe", "google chrome": "chrome.exe", "microsoft edge": "msedge.exe", "edge": "msedge.exe",
-            "firefox": "firefox.exe",
+            "firefox": "firefox.exe", "teams": "start msteams:", "microsoft teams": "start msteams:",
+            "telegram": "start telegram:", "vlc": "vlc.exe", "vl": "vlc.exe",
+        }
+        self._app_paths = {
+            "chrome": [
+                Path(os.environ.get("ProgramFiles", "")) / "Google" / "Chrome" / "Application" / "chrome.exe",
+                Path(os.environ.get("ProgramFiles(x86)", "")) / "Google" / "Chrome" / "Application" / "chrome.exe",
+                Path(os.environ.get("LOCALAPPDATA", "")) / "Google" / "Chrome" / "Application" / "chrome.exe",
+            ],
+            "google chrome": [
+                Path(os.environ.get("ProgramFiles", "")) / "Google" / "Chrome" / "Application" / "chrome.exe",
+                Path(os.environ.get("ProgramFiles(x86)", "")) / "Google" / "Chrome" / "Application" / "chrome.exe",
+                Path(os.environ.get("LOCALAPPDATA", "")) / "Google" / "Chrome" / "Application" / "chrome.exe",
+            ],
+            "blender": [
+                Path(os.environ.get("ProgramFiles", "")) / "Blender Foundation" / "Blender 4.3" / "blender.exe",
+                Path(os.environ.get("ProgramFiles", "")) / "Blender Foundation" / "Blender 4.2" / "blender.exe",
+                Path(os.environ.get("ProgramFiles", "")) / "Blender Foundation" / "Blender 4.1" / "blender.exe",
+            ],
+            "vlc": [
+                Path(os.environ.get("ProgramFiles", "")) / "VideoLAN" / "VLC" / "vlc.exe",
+                Path(os.environ.get("ProgramFiles(x86)", "")) / "VideoLAN" / "VLC" / "vlc.exe",
+            ],
+            "vl": [
+                Path(os.environ.get("ProgramFiles", "")) / "VideoLAN" / "VLC" / "vlc.exe",
+                Path(os.environ.get("ProgramFiles(x86)", "")) / "VideoLAN" / "VLC" / "vlc.exe",
+            ],
         }
         self._known_sites = {
             "notebooklm": "https://notebooklm.google.com/", "chatgpt": "https://chatgpt.com/", "github": "https://github.com/",
@@ -65,12 +95,18 @@ class SystemService:
             "google calendar": "https://calendar.google.com/", "google maps": "https://maps.google.com/", "wikipedia": "https://wikipedia.org/",
             "youtube": "https://www.youtube.com/", "spotify": "https://open.spotify.com/", "notion": "https://www.notion.so/",
             "stackoverflow": "https://stackoverflow.com/", "whatsapp web": "https://web.whatsapp.com/",
+            "amazon": "https://www.amazon.in/", "amazon.in": "https://www.amazon.in/",
         }
         self._search_cache: dict[tuple[str, str, int], tuple[float, list[str]]] = {}
         self._folder_analysis_cache: dict[tuple[str, str], tuple[float, str]] = {}
         self._plan_cache: dict[tuple[str, str, tuple[str, ...]], tuple[float, list[PlannedMove]]] = {}
         self._text_cache: dict[tuple[str, float], str] = {}
         self._image_meta_cache: dict[tuple[str, float], tuple[str, float | None]] = {}
+        self._app_index_cache: tuple[float, dict[str, str]] = (0.0, {})
+        self._scan_timeout_seconds = 2.4
+        self._scan_max_nodes = 22_000
+        self._image_analysis_limit = 220
+        self._image_analysis_budget_seconds = 2.0
         self._organize_buckets = {
             "Documents": {".pdf", ".doc", ".docx", ".txt", ".rtf", ".ppt", ".pptx", ".xls", ".xlsx", ".csv"},
             "Images": {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg", ".heic"},
@@ -96,11 +132,26 @@ class SystemService:
         }
 
     def open_app(self, app_name: str) -> str:
-        target = self._known_apps.get(app_name.lower().strip(), app_name.strip())
+        cleaned = app_name.lower().strip()
+        for path in self._app_paths.get(cleaned, []):
+            if path.exists():
+                return self.open_file(str(path))
+        target = self._known_apps.get(cleaned, app_name.strip())
+        if target == app_name.strip() and "." not in target and not target.endswith(":"):
+            exe_guess = f"{target}.exe"
+            if shutil.which(exe_guess):
+                target = exe_guess
+        if target == app_name.strip():
+            shortcut = self._resolve_installed_app_shortcut(app_name)
+            if shortcut is not None:
+                return self.open_file(shortcut)
         return self._run_command(target, f"Opening {app_name}.")
 
     def open_target(self, target: str) -> str:
         normalized = target.lower().strip()
+        normalized = self._normalize_open_target(normalized)
+        if normalized in {"recycle bin", "recyclebin", "bin"}:
+            return self._run_command('explorer.exe shell:RecycleBinFolder', "Opening Recycle Bin.")
         if normalized in self._special_folders:
             return self.open_folder(str(self._special_folders[normalized]))
         if normalized in self._known_sites:
@@ -114,6 +165,17 @@ class SystemService:
         executable = shutil.which(target)
         if executable:
             return self.open_file(executable)
+        if "." not in normalized:
+            executable = shutil.which(f"{target}.exe")
+            if executable:
+                return self.open_file(executable)
+        shortcut = self._resolve_installed_app_shortcut(target)
+        if shortcut is not None:
+            return self.open_file(shortcut)
+        if "resume" in normalized:
+            resume = self._find_resume(normalized)
+            if resume is not None:
+                return self.open_file(str(resume))
         local_matches = self.search_files(target, limit=1)
         if local_matches:
             first = Path(local_matches[0])
@@ -129,6 +191,41 @@ class SystemService:
             webbrowser.open(f"https://www.google.com/search?q={guessed_site}")
             return f"I couldn't match a local app, so I searched the web for {target}."
         return f"I couldn't figure out how to open {target}."
+
+    def _normalize_open_target(self, target: str) -> str:
+        aliases = {
+            "download": "downloads",
+            "document": "documents",
+            "yt": "youtube",
+            "vl": "vlc",
+            "res": "davinci resolve",
+            "resolve": "davinci resolve",
+        }
+        return aliases.get(target, target)
+
+    def _find_resume(self, query: str) -> Path | None:
+        matches: list[Path] = []
+        for root_name in ("desktop", "documents", "downloads"):
+            root = self._special_folders.get(root_name)
+            if root is None or not root.exists():
+                continue
+            try:
+                for path in root.rglob("*resume*"):
+                    matches.append(path)
+                    if len(matches) >= 30:
+                        break
+            except OSError:
+                continue
+        if "abhay" in query:
+            named = [path for path in matches if "abhay" in path.name.lower() or "abhay" in str(path.parent).lower()]
+            if named:
+                matches = named
+        files = [path for path in matches if path.exists() and path.is_file()]
+        if not files:
+            return None
+        if "latest" in query or "new" in query:
+            return max(files, key=lambda path: path.stat().st_mtime)
+        return files[0]
 
     def open_folder(self, path: str) -> str:
         expanded = Path(os.path.expandvars(path)).expanduser()
@@ -153,6 +250,8 @@ class SystemService:
 
     def search_files(self, name: str, limit: int = 8) -> list[str]:
         needle = name.lower().strip()
+        if not needle:
+            return []
         cached = self._cache_get(("global", needle, limit))
         if cached is not None:
             return cached
@@ -162,41 +261,73 @@ class SystemService:
             self._cache_set(("global", needle, limit), ranked_quick)
             return ranked_quick
         matches: list[str] = []
+        candidate_target = max(limit * 6, limit + 6)
+        per_root_nodes = max(600, self._scan_max_nodes // max(1, len(self._search_roots)))
         for root in self._search_roots:
             if not root.exists():
                 continue
-            try:
-                for path in root.rglob("*"):
-                    if needle in path.name.lower():
-                        matches.append(str(path))
-                        if len(matches) >= limit:
-                            ranked = self._rank_matches(matches, needle)[:limit]
-                            self._cache_set(("global", needle, limit), ranked)
-                            return ranked
-            except OSError:
-                continue
+            for path in self._iter_tree_paths(
+                root,
+                max_nodes=per_root_nodes,
+                time_budget_seconds=self._scan_timeout_seconds,
+            ):
+                if needle in path.name.lower():
+                    matches.append(str(path))
+                    if len(matches) >= candidate_target:
+                        break
+            if len(matches) >= candidate_target:
+                break
         ranked = self._rank_matches(matches, needle)[:limit]
+        if not ranked and " " in needle:
+            ranked = self._token_search(needle, limit)
         self._cache_set(("global", needle, limit), ranked)
         return ranked
+
+    def _token_search(self, needle: str, limit: int) -> list[str]:
+        tokens = [token for token in re.findall(r"[a-z0-9]{2,}", needle) if token not in {"the", "of", "for", "latest", "new"}]
+        if not tokens:
+            return []
+        matches: list[str] = []
+        candidate_target = max(limit * 4, limit)
+        per_root_nodes = max(500, self._scan_max_nodes // max(1, len(self._search_roots)))
+        for root in self._search_roots:
+            if not root.exists():
+                continue
+            for path in self._iter_tree_paths(
+                root,
+                max_nodes=per_root_nodes,
+                time_budget_seconds=self._scan_timeout_seconds,
+            ):
+                haystack = f"{path.name} {path.parent}".lower()
+                if all(token in haystack for token in tokens):
+                    matches.append(str(path))
+                    if len(matches) >= candidate_target:
+                        break
+            if len(matches) >= candidate_target:
+                break
+        return self._rank_matches(matches, needle)[:limit]
 
     def search_within_folder(self, name: str, folder: str, limit: int = 8) -> list[str]:
         root = self._resolve_folder(folder)
         if root is None or not root.exists():
             return []
         needle = name.lower().strip()
+        if not needle:
+            return []
         cache_key = (str(root).lower(), needle, limit)
         cached = self._cache_get(cache_key)
         if cached is not None:
             return cached
         matches: list[str] = []
-        try:
-            for path in root.rglob("*"):
-                if needle in path.name.lower():
-                    matches.append(str(path))
-                    if len(matches) >= max(limit * 4, limit):
-                        break
-        except OSError:
-            return []
+        for path in self._iter_tree_paths(
+            root,
+            max_nodes=self._scan_max_nodes,
+            time_budget_seconds=self._scan_timeout_seconds,
+        ):
+            if needle in path.name.lower():
+                matches.append(str(path))
+                if len(matches) >= max(limit * 4, limit):
+                    break
         ranked = self._rank_matches(matches, needle)[:limit]
         self._cache_set(cache_key, ranked)
         return ranked
@@ -328,8 +459,34 @@ class SystemService:
 
     def set_brightness(self, percent: int) -> str:
         percent = max(10, min(100, percent))
-        script = "(Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods)" f".WmiSetBrightness(1,{percent})"
-        return self._run_powershell(script, f"Brightness set to {percent}%.")
+        script = (
+            "$methods = Get-CimInstance -Namespace root/WMI -ClassName WmiMonitorBrightnessMethods "
+            "-ErrorAction SilentlyContinue; "
+            "if (-not $methods) { exit 2 }; "
+            f"$methods | ForEach-Object {{ Invoke-CimMethod -InputObject $_ -MethodName WmiSetBrightness -Arguments @{{Timeout=1;Brightness={percent}}} | Out-Null }}; "
+            "Start-Sleep -Milliseconds 250; "
+            "$current = Get-CimInstance -Namespace root/WMI -ClassName WmiMonitorBrightness -ErrorAction SilentlyContinue | "
+            "Select-Object -First 1 -ExpandProperty CurrentBrightness; "
+            "if ($null -eq $current) { exit 3 }; "
+            "Write-Output $current"
+        )
+        try:
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+                capture_output=True,
+                text=True,
+                timeout=8,
+                shell=False,
+            )
+            output = (result.stdout or result.stderr or "").strip()
+            if result.returncode == 0:
+                current = output.splitlines()[-1].strip() if output else str(percent)
+                return f"Brightness set to {current}%."
+            if result.returncode == 2:
+                return "Brightness control is not exposed by this display. Windows only allows this on supported internal laptop panels."
+            return f"I couldn't change brightness automatically. Windows returned: {output or result.returncode}"
+        except Exception as exc:
+            return f"I couldn't change brightness automatically: {exc}"
 
     def wifi(self, enabled: bool) -> str:
         state = "enabled" if enabled else "disabled"
@@ -376,6 +533,27 @@ class SystemService:
 
     def sleep_pc(self) -> str:
         return self._run_command("rundll32.exe powrprof.dll,SetSuspendState 0,1,0", "Putting the PC to sleep.")
+
+    def shutdown_pc(self) -> str:
+        return self._run_command("shutdown /s /t 5", "Shutdown scheduled in 5 seconds.")
+
+    def restart_pc(self) -> str:
+        return self._run_command("shutdown /r /t 5", "Restart scheduled in 5 seconds.")
+
+    def cancel_shutdown(self) -> str:
+        return self._run_command("shutdown /a", "Cancelled any pending shutdown or restart.")
+
+    def logoff_pc(self) -> str:
+        return self._run_command("shutdown /l", "Signing out.")
+
+    def display_settings(self) -> str:
+        return self._run_command("start ms-settings:display", "Opening display settings.")
+
+    def sound_settings(self) -> str:
+        return self._run_command("start ms-settings:sound", "Opening sound settings.")
+
+    def network_settings(self) -> str:
+        return self._run_command("start ms-settings:network", "Opening network settings.")
 
     def open_website(self, url: str, label: str) -> str:
         webbrowser.open(url)
@@ -458,10 +636,14 @@ class SystemService:
     def _find_duplicate_images(self, files: list[Path]) -> set[str]:
         if Image is None:
             return set()
+        candidates = self._image_candidates(files)
+        if not candidates:
+            return set()
         hashes: dict[str, list[Path]] = {}
-        for path in files:
-            if self._bucket_for(path) != "Images":
-                continue
+        start = time.monotonic()
+        for path in candidates:
+            if time.monotonic() - start > self._image_analysis_budget_seconds:
+                break
             image_hash = self._image_hash(path)
             if image_hash:
                 hashes.setdefault(image_hash, []).append(path)
@@ -475,14 +657,25 @@ class SystemService:
     def _find_blurry_images(self, files: list[Path]) -> set[str]:
         if Image is None or ImageFilter is None:
             return set()
+        candidates = self._image_candidates(files)
+        if not candidates:
+            return set()
         blurry: set[str] = set()
-        for path in files:
-            if self._bucket_for(path) != "Images":
-                continue
+        start = time.monotonic()
+        for path in candidates:
+            if time.monotonic() - start > self._image_analysis_budget_seconds:
+                break
             score = self._sharpness_score(path)
             if score is not None and score < 4.0:
                 blurry.add(str(path))
         return blurry
+
+    def _image_candidates(self, files: list[Path]) -> list[Path]:
+        images = [path for path in files if self._bucket_for(path) == "Images"]
+        if len(images) <= self._image_analysis_limit:
+            return images
+        images.sort(key=lambda path: path.name.lower())
+        return images[: self._image_analysis_limit]
 
     def _image_hash(self, path: Path) -> str:
         cache_key = self._path_cache_key(path)
@@ -743,6 +936,34 @@ class SystemService:
             self._search_cache.pop(next(iter(self._search_cache)), None)
         self._search_cache[key] = (time.monotonic(), list(value))
 
+    def _iter_tree_paths(
+        self,
+        root: Path,
+        max_nodes: int = 10_000,
+        time_budget_seconds: float = 2.0,
+    ):
+        if max_nodes <= 0:
+            return
+        queue = deque([root])
+        scanned = 0
+        start = time.monotonic()
+        while queue and scanned < max_nodes:
+            if time.monotonic() - start > time_budget_seconds:
+                break
+            current = queue.popleft()
+            try:
+                with os.scandir(current) as entries:
+                    for entry in entries:
+                        scanned += 1
+                        if scanned > max_nodes:
+                            break
+                        path = Path(entry.path)
+                        yield path
+                        if entry.is_dir(follow_symlinks=False):
+                            queue.append(path)
+            except OSError:
+                continue
+
     def _rank_matches(self, matches: list[str], needle: str) -> list[str]:
         def score(path_text: str) -> tuple[int, int, int, str]:
             path = Path(path_text)
@@ -844,3 +1065,52 @@ class SystemService:
         if any(token in text or token in lowered_name for token in hint_tokens):
             return False
         return True
+
+    def _resolve_installed_app_shortcut(self, target: str) -> str | None:
+        if not target.strip():
+            return None
+        index = self._installed_app_index()
+        normalized = self._normalize_app_key(target)
+        direct = index.get(normalized)
+        if direct:
+            return direct
+        bad_words = {"reset", "preferences", "cache", "uninstall", "readme", "help"}
+        candidates: list[tuple[int, str, str]] = []
+        for key, path in index.items():
+            if normalized in key:
+                penalty = sum(1 for word in bad_words if word in key)
+                exact = 5 if key == normalized else 0
+                starts = 3 if key.startswith(normalized) else 0
+                candidates.append((exact + starts - penalty, key, path))
+        if candidates:
+            candidates.sort(reverse=True)
+            return candidates[0][2]
+        return None
+
+    def _installed_app_index(self) -> dict[str, str]:
+        cached_at, cached = self._app_index_cache
+        if time.monotonic() - cached_at < 300.0 and cached:
+            return cached
+        roots = [
+            Path(os.path.expandvars(r"%APPDATA%\Microsoft\Windows\Start Menu\Programs")),
+            Path(os.path.expandvars(r"%ProgramData%\Microsoft\Windows\Start Menu\Programs")),
+        ]
+        index: dict[str, str] = {}
+        for root in roots:
+            if not root.exists():
+                continue
+            try:
+                for path in root.rglob("*.lnk"):
+                    key = self._normalize_app_key(path.stem)
+                    if key and key not in index:
+                        index[key] = str(path)
+            except OSError:
+                continue
+        self._app_index_cache = (time.monotonic(), index)
+        return index
+
+    def _normalize_app_key(self, text: str) -> str:
+        normalized = re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+        normalized = normalized.replace("new", "").strip()
+        normalized = re.sub(r"\s+", " ", normalized)
+        return normalized

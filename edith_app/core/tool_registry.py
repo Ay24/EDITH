@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 import subprocess
 import time
@@ -17,17 +18,15 @@ class ToolRegistry:
         self._root = Path(workspace_root)
         self._ignored_parts = {".git", ".venv", "venv", "__pycache__", ".idea"}
         self._observation_cache: dict[tuple[str, str, int], tuple[float, ToolObservation]] = {}
+        self._text_extensions = {".py", ".md", ".txt", ".json", ".toml", ".yml", ".yaml", ".ini", ".cfg"}
+        self._max_scan_file_bytes = 256_000
 
     def project_summary(self) -> ToolObservation:
         cached = self._cache_get(("project_summary", "", 0), ttl=20.0)
         if cached is not None:
             return cached
         counts: dict[str, int] = {}
-        for path in self._root.rglob("*"):
-            if not path.is_file():
-                continue
-            if any(part in self._ignored_parts for part in path.parts):
-                continue
+        for path in self._iter_files():
             ext = path.suffix.lower() or "<none>"
             counts[ext] = counts.get(ext, 0) + 1
         ranked = sorted(counts.items(), key=lambda item: item[1], reverse=True)[:10]
@@ -41,15 +40,8 @@ class ToolRegistry:
         if cached is not None:
             return cached
         files: list[str] = []
-        for path in self._root.rglob("*"):
-            if path.is_dir():
-                if path.name in self._ignored_parts:
-                    continue
-                continue
-            rel = path.relative_to(self._root)
-            if any(part in self._ignored_parts for part in rel.parts):
-                continue
-            files.append(str(rel))
+        for path in self._iter_files(max_files=limit):
+            files.append(str(path.relative_to(self._root)))
             if len(files) >= limit:
                 break
         detail = "\n".join(files) if files else "No visible files found."
@@ -65,10 +57,13 @@ class ToolRegistry:
         cached = self._cache_get(("search_text", lowered, limit), ttl=12.0)
         if cached is not None:
             return cached
-        for path in self._root.rglob("*"):
-            if not path.is_file():
+        for path in self._iter_files():
+            if path.suffix.lower() not in self._text_extensions:
                 continue
-            if any(part in self._ignored_parts for part in path.parts):
+            try:
+                if path.stat().st_size > self._max_scan_file_bytes:
+                    continue
+            except OSError:
                 continue
             try:
                 text = path.read_text(encoding="utf-8", errors="ignore")
@@ -106,11 +101,11 @@ class ToolRegistry:
             return cached
         try:
             result = subprocess.run(
-                ["python", "-m", "compileall", ".", "-q"],
+                ["python", "-m", "compileall", "edith_app", "main.py", "-q"],
                 cwd=self._root,
                 capture_output=True,
                 text=True,
-                timeout=120,
+                timeout=45,
                 shell=False,
             )
             output = (result.stdout + "\n" + result.stderr).strip()
@@ -133,9 +128,7 @@ class ToolRegistry:
         if cached is not None:
             return cached
         matches: list[str] = []
-        for path in self._root.rglob("*"):
-            if any(part in self._ignored_parts for part in path.parts):
-                continue
+        for path in self._iter_paths():
             if lowered in path.name.lower():
                 matches.append(str(path.relative_to(self._root)))
                 if len(matches) >= limit:
@@ -148,12 +141,8 @@ class ToolRegistry:
         lowered = goal.lower()
         candidates: list[str] = []
         keywords = [word for word in lowered.split() if len(word) >= 4][:6]
-        for path in self._root.rglob("*"):
-            if not path.is_file():
-                continue
+        for path in self._iter_files():
             if path.suffix.lower() not in {".py", ".md", ".toml", ".json", ".txt"}:
-                continue
-            if any(part in self._ignored_parts for part in path.parts):
                 continue
             score = 0
             path_text = str(path.relative_to(self._root)).lower()
@@ -187,3 +176,22 @@ class ToolRegistry:
         if len(self._observation_cache) > 64:
             self._observation_cache.pop(next(iter(self._observation_cache)), None)
         self._observation_cache[key] = (time.monotonic(), observation)
+
+    def _iter_paths(self):
+        for root, dirs, files in os.walk(self._root):
+            dirs[:] = [name for name in dirs if name not in self._ignored_parts]
+            root_path = Path(root)
+            for name in files:
+                path = root_path / name
+                if any(part in self._ignored_parts for part in path.parts):
+                    continue
+                yield path
+
+    def _iter_files(self, max_files: int | None = None):
+        seen = 0
+        for path in self._iter_paths():
+            if path.is_file():
+                yield path
+                seen += 1
+                if max_files is not None and seen >= max_files:
+                    return

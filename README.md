@@ -85,6 +85,9 @@ When internet is unavailable, Edith now stays useful instead of failing noisily:
 - `open downloads`
 - `find budget in documents`
 - `message primary_contact saying this is a test message`
+- `enable whatsapp auto yes no`
+- `whatsapp auto reply status`
+- `auto reply to primary_contact`
 - `set volume to 40`
 - `set brightness to 60`
 - `wifi off`
@@ -137,6 +140,8 @@ When internet is unavailable, Edith now stays useful instead of failing noisily:
 - `EDITH_TELEMETRY_PATH`
 - `EDITH_SELF_IMPROVE_OVERRIDES_PATH`
 - `EDITH_RUNTIME_LOG_PATH`
+- `EDITH_WHATSAPP_REPLY_STYLE_PATH`
+- `EDITH_TESSERACT_CMD`
 
 ## Notes
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 import time
+from pathlib import Path
 
 try:
     import pyautogui
@@ -12,6 +13,10 @@ try:
     import pyperclip
 except ImportError:
     pyperclip = None
+try:
+    from pywinauto import Desktop
+except ImportError:
+    Desktop = None
 
 
 class WhatsAppService:
@@ -94,16 +99,71 @@ class WhatsAppService:
         time.sleep(2.5)
 
         try:
-            pyautogui.hotkey("ctrl", "a")
-            time.sleep(0.2)
-            pyautogui.hotkey("ctrl", "c")
-            time.sleep(0.4)
-            copied = pyperclip.paste().strip()
-            if not copied:
-                return "I couldn't copy the visible WhatsApp chat text."
-            return copied[-2000:]
+            baseline = pyperclip.paste()
+            copied = self._copy_visible_chat_text(baseline)
+            if copied:
+                return copied[-4000:]
+            return "I couldn't copy the visible WhatsApp chat text."
         except Exception as exc:
             return f"I couldn't read the current WhatsApp chat: {exc}"
+
+    def read_current_chat_uia(self) -> str:
+        if Desktop is None:
+            return ""
+        try:
+            win = self._find_whatsapp_window()
+            if win is None:
+                return ""
+            try:
+                win.set_focus()
+            except Exception:
+                pass
+            texts: list[str] = []
+            descendants = win.descendants()
+            for el in descendants:
+                try:
+                    text = (el.window_text() or "").strip()
+                except Exception:
+                    continue
+                if not text:
+                    continue
+                if len(text) > 220:
+                    text = text[:220]
+                if self._likely_chat_line(text):
+                    texts.append(text)
+            if not texts:
+                return ""
+            deduped: list[str] = []
+            seen: set[str] = set()
+            for t in texts:
+                key = t.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                deduped.append(t)
+            return "\n".join(deduped[-80:])
+        except Exception:
+            return ""
+
+    def capture_chat_screenshot(self) -> str | None:
+        if pyautogui is None:
+            return None
+        try:
+            path = Path("data") / "whatsapp_chat_capture.png"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            shot = pyautogui.screenshot()
+            width, height = shot.size
+            # Approximate WhatsApp Desktop chat pane crop (right side, excluding left chat list).
+            left = int(width * 0.30)
+            top = int(height * 0.10)
+            right = int(width * 0.99)
+            bottom = int(height * 0.95)
+            if right > left and bottom > top:
+                shot = shot.crop((left, top, right, bottom))
+            shot.save(path)
+            return str(path)
+        except Exception:
+            return None
 
     def _open_chat(self, contact_name: str) -> bool:
         if not self.available:
@@ -127,3 +187,90 @@ class WhatsAppService:
             return True
         except Exception:
             return False
+
+    def _copy_visible_chat_text(self, baseline_clipboard: str) -> str:
+        if not self.available:
+            return ""
+
+        # Focus chat pane to improve copy reliability.
+        screen_w, screen_h = pyautogui.size()
+        pyautogui.click(int(screen_w * 0.72), int(screen_h * 0.46))
+        time.sleep(0.15)
+        pyautogui.press("esc")
+        time.sleep(0.1)
+
+        attempts: list[tuple[str, callable]] = [
+            (
+                "ctrl_a_copy",
+                lambda: (
+                    pyautogui.hotkey("ctrl", "a"),
+                    time.sleep(0.15),
+                    pyautogui.hotkey("ctrl", "c"),
+                ),
+            ),
+            (
+                "page_up_then_copy",
+                lambda: (
+                    pyautogui.press("pageup"),
+                    time.sleep(0.15),
+                    pyautogui.hotkey("ctrl", "a"),
+                    time.sleep(0.12),
+                    pyautogui.hotkey("ctrl", "c"),
+                ),
+            ),
+        ]
+
+        for _, run_attempt in attempts:
+            try:
+                run_attempt()
+            except Exception:
+                continue
+            time.sleep(0.35)
+            copied = pyperclip.paste().strip()
+            if not copied:
+                continue
+            if copied == (baseline_clipboard or "").strip():
+                continue
+            if len(copied) < 10:
+                continue
+            return copied
+        return ""
+
+    def _find_whatsapp_window(self):
+        if Desktop is None:
+            return None
+        desktop = Desktop(backend="uia")
+        candidates = desktop.windows()
+        for win in candidates:
+            try:
+                title = (win.window_text() or "").lower()
+            except Exception:
+                continue
+            if "whatsapp" in title:
+                return win
+        return None
+
+    def _likely_chat_line(self, text: str) -> bool:
+        lowered = text.lower().strip()
+        if len(lowered) < 2:
+            return False
+        blocked = (
+            "whatsapp",
+            "search",
+            "new chat",
+            "typing",
+            "online",
+            "yesterday",
+            "today",
+            "menu",
+            "archive",
+            "settings",
+            "status",
+            "channels",
+            "communities",
+        )
+        if lowered in blocked:
+            return False
+        if lowered.startswith(("ctrl+", "alt+", "press ")):
+            return False
+        return True

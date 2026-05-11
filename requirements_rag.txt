@@ -1,0 +1,11 @@
+# RAG-specific dependencies for EDITH's Knowledge Base system
+# Install with: pip install -r requirements_rag.txt
+
+# Vector database — persistent local ChromaDB
+chromadb>=0.5.0
+
+# Embedding model (BGE-small) + cross-encoder (ms-marco-MiniLM)
+sentence-transformers>=3.0.0
+
+# PDF document ingestion support
+pypdf>=4.0.0
