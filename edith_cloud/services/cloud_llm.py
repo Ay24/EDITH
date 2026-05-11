@@ -291,7 +291,7 @@ class CloudLLMService:
                 return "".join(chunks).strip()
             return self._ollama_fallback("reply", prompt, history, context_kwargs)
 
-    # ── Message builder (Groq uses OpenAI-style messages) ─────────────────────
+    # ── Message builder (Groq-compatible chat messages) ─────────────────────
 
     def _build_messages(
         self,

@@ -90,7 +90,7 @@ class SystemService:
             ],
         }
         self._known_sites = {
-            "notebooklm": "https://notebooklm.google.com/", "chatgpt": "https://chatgpt.com/", "github": "https://github.com/",
+            "notebooklm": "https://notebooklm.google.com/", "github": "https://github.com/",
             "gmail": "https://mail.google.com/", "google docs": "https://docs.google.com/", "google drive": "https://drive.google.com/",
             "google calendar": "https://calendar.google.com/", "google maps": "https://maps.google.com/", "wikipedia": "https://wikipedia.org/",
             "youtube": "https://www.youtube.com/", "spotify": "https://open.spotify.com/", "notion": "https://www.notion.so/",

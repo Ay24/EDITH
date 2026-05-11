@@ -65,7 +65,7 @@ Capabilities:
 * System control (brightness, volume, apps)
 * Web search & automation
 * Emotion detection (image-based)
-* GPT-based responses
+* Context-aware responses
 
 Future Goals:
 
@@ -107,7 +107,7 @@ Future Goals:
   * Speech recognition
   * Wikipedia search
   * System control
-  * GPT-2 based responses
+  * Rule-based responses
   * Sarcastic interaction style
 
 ---
