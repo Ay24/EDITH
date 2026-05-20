@@ -227,6 +227,7 @@ def _run_preflight_test() -> bool:
         return False
 
     logger.info("Running native engine pre-flight test...")
+    engine = None
     try:
         engine = AdaptiveLlamaEngine(model_path=str(MODEL_PATH), profile_name=PROFILE)
         response = engine.generate(
@@ -235,13 +236,27 @@ def _run_preflight_test() -> bool:
             stream=False,
         )
         output = response["choices"][0]["text"].strip()
-        logger.info(f"Pre-flight result: '{output}'")
-        engine.shutdown()
-        import gc; gc.collect()
+        logger.info(f"Pre-flight result: '{output[:60]}'")
         return True
     except Exception as e:
         logger.error(f"Pre-flight test failed: {e}")
         return False
+    finally:
+        # CRITICAL: explicitly shut down and delete the engine so the GPU VRAM
+        # is fully released before the main app creates its own engine instance.
+        # Without this, the GTX 1650's 4GB VRAM is already occupied and the
+        # second Llama load fails with "Failed to load model from file".
+        if engine is not None:
+            try:
+                engine.shutdown()
+            except Exception:
+                pass
+            del engine
+        import gc
+        gc.collect()
+        import time
+        time.sleep(1.0)  # give the CUDA driver time to reclaim VRAM
+
 
 
 def main() -> None:

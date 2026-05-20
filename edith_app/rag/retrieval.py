@@ -262,48 +262,58 @@ class RAGRetriever:
             return True
         try:
             import chromadb  # type: ignore
-
-            # Use Ollama's highly optimized embedding function
-            class OllamaEmbed:
-                def __init__(self, model_name):
-                    self.model = model_name
-                    import requests
-                    self.requests = requests
-
-                def __call__(self, input):
-                    if isinstance(input, str): input = [input]
-                    res = []
-                    for t in input:
-                        r = self.requests.post(
-                            "http://127.0.0.1:11434/api/embed", 
-                            json={
-                                "model": self.model, 
-                                "input": t,
-                                "options": {"num_ctx": 2048}
-                            }, 
-                            timeout=10
-                        )
-                        if r.status_code == 200:
-                            emb = r.json().get("embeddings", [[]])[0]
-                            res.append(emb)
-                        else:
-                            res.append([])
-                    return res
+            from sentence_transformers import SentenceTransformer  # type: ignore
 
             self._chroma_path.mkdir(parents=True, exist_ok=True)
             self._client = chromadb.PersistentClient(path=str(self._chroma_path))
-            emb_fn = OllamaEmbed(self._embed_model_name)
+
+            # CPU-only embedder — never competes with the main LLM for VRAM.
+            # Uses the same model that was used to ingest the collection (768-dim).
+            # GTX 1650 cannot run F16 cuBLAS ops (nomic-embed-text crashes).
+            cpu_model = SentenceTransformer(
+                self._embed_model_name,
+                device="cpu",
+                trust_remote_code=True,
+            )
+
+            class _SentenceTransformerEmbed:
+                """ChromaDB-compatible embedding function wrapper."""
+                def __init__(self, model: SentenceTransformer) -> None:
+                    self._model = model
+
+                def __call__(self, input: list[str]) -> list[list[float]]:
+                    if isinstance(input, str):
+                        input = [input]
+                    try:
+                        vecs = self._model.encode(
+                            input,
+                            normalize_embeddings=True,
+                            batch_size=16,
+                            show_progress_bar=False,
+                        )
+                        return [v.tolist() for v in vecs]
+                    except Exception as exc:
+                        logger.warning("Embedding failed: %s", exc)
+                        # Return empty lists — ChromaDB will reject rather than
+                        # silently store dimension-mismatched zero vectors.
+                        return [[] for _ in input]
+
+            emb_fn = _SentenceTransformerEmbed(cpu_model)
+            self._embedder = emb_fn
             self._col = self._client.get_or_create_collection(
                 name=self._collection_name,
                 embedding_function=emb_fn,
                 metadata={"hnsw:space": "cosine"},
             )
-            self._embedder = emb_fn
             self._ready = True
-            logger.info("Retriever ready — chunks=%d", self._col.count())
+            logger.info(
+                "Retriever ready — model=%s device=cpu chunks=%d",
+                self._embed_model_name,
+                self._col.count(),
+            )
             return True
-        except ImportError:
-            logger.warning("RAG retrieval deps missing. pip install chromadb")
+        except ImportError as exc:
+            logger.warning("RAG retrieval deps missing (%s). pip install chromadb sentence-transformers", exc)
             return False
         except Exception as exc:
             logger.error("Retriever init error: %s", exc)
@@ -312,7 +322,8 @@ class RAGRetriever:
     def _embed(self, text: str) -> list[float]:
         """Embed a single text string, returning a normalised float list."""
         try:
-            return self._embedder([text])[0]
+            result = self._embedder([text])
+            return result[0] if result and result[0] else []
         except Exception as exc:
             logger.warning("Embedding failed: %s", exc)
             return []

@@ -23,7 +23,7 @@ class EdithDesktopUI:
         
         # Use centralized root passed from app.py
         self.root = root if root else tk.Tk()
-        self.root.title("Edith Neural Console")
+        self.root.title("EDITH ORBIT — Local Voice Agent")
         
         # Frameless Transparent HUD
         self.root.overrideredirect(True)
@@ -40,21 +40,21 @@ class EdithDesktopUI:
         self.root.minsize(980, 680)
         
         self._colors = {
-            "bg": "#000001",  # Transparent key color
-            "panel": "#0A0F1A",
-            "card": "#111827",
-            "hero": "#1F2937",
-            "glass": "#374151",
-            "surface": "#0F172A",
-            "entry": "#1E293B",
-            "line": "#334155",
-            "text": "#F8FAFC",
-            "muted": "#94A3B8",
-            "accent": "#38BDF8",
-            "accent_soft": "#7DD3FC",
-            "success": "#34D399",
-            "warn": "#FBBF24",
-            "error": "#EF4444",
+            "bg": "#000001",
+            "panel": "#0A0612",
+            "card": "#120A1E",
+            "hero": "#1A0F2E",
+            "glass": "#2A1848",
+            "surface": "#0E0818",
+            "entry": "#1E1234",
+            "line": "#4A2D7A",
+            "text": "#F5EEFF",
+            "muted": "#B8A0D8",
+            "accent": "#C77DFF",
+            "accent_soft": "#E8B4FF",
+            "success": "#5FFFB0",
+            "warn": "#FFD166",
+            "error": "#FF6B8A",
         }
         self.root.configure(bg=self._colors["bg"])
         self.root.wm_attributes("-transparentcolor", self._colors["bg"])
@@ -62,14 +62,14 @@ class EdithDesktopUI:
         # State Variables
         self.input_var = tk.StringVar()
         self.status_var = tk.StringVar()
-        self.health_var = tk.StringVar(value="Neural systems warming up...")
+        self.health_var = tk.StringVar(value="Warming up...")
         self.mode_var = tk.StringVar()
-        self.situation_var = tk.StringVar(value="Initializing neural systems...")
-        self.quick_var = tk.StringVar(value="JARVIS: Ready for command.")
-        self.entity_var = tk.StringVar(value="Neural entity analysis pending...")
-        self.cowork_var = tk.StringVar(value="Cowork pipeline idle.")
+        self.situation_var = tk.StringVar(value="All systems nominal.")
+        self.quick_var = tk.StringVar(value="EDITH is ready.")
+        self.entity_var = tk.StringVar(value="No active scan.")
+        self.cowork_var = tk.StringVar(value="No active tasks.")
         self.preflight_var = tk.StringVar(value="Diagnostics nominal.")
-        self.voice_var = tk.StringVar(value="Voice mode offline")
+        self.voice_var = tk.StringVar(value="Voice offline")
         
         self.chat_log: tk.Text | None = None
         self.command_entry: tk.Entry | None = None
@@ -78,10 +78,14 @@ class EdithDesktopUI:
         self.voice_thread: threading.Thread | None = None
         self.stop_event = threading.Event()
         self.processing = False
+        self._command_idle = threading.Event()
+        self._command_idle.set()
         self.immersive_window: tk.Toplevel | None = None
         self.voice_state = "idle"
-        self.voice_state_label_var = tk.StringVar(value="STATE: IDLE")
+        self.voice_state_label_var = tk.StringVar(value="ORBIT · IDLE")
+        self.partial_var = tk.StringVar(value="")
         self.loading_var = tk.StringVar(value="")
+        self._waveform_levels: deque[float] = deque(maxlen=36)
         self._stream_token_buffer: deque[str] = deque()
         self._stream_flush_scheduled = False
         self._max_chat_lines = max(200, assistant.config.ui_max_chat_lines)
@@ -121,8 +125,10 @@ class EdithDesktopUI:
         self._build_layout()
         self._initialize()
         
-        # Background loops
-        self._schedule(80, self._process_voice_queue)
+        # Background loops — voice queue polled at 16ms in ultra-latency mode
+        poll_ms = max(8, int(getattr(assistant.config, "ui_voice_poll_ms", 16)))
+        self._voice_poll_ms = poll_ms
+        self._schedule(poll_ms, self._process_voice_queue)
         self._schedule(self._ui_motion_frame_ms, self._animate_sphere)
         self._schedule(self._ui_motion_frame_ms, self._motion_tick)
         
@@ -347,20 +353,20 @@ class EdithDesktopUI:
         self._bind_smooth_hover(pin_btn, self._colors["glass"], self._colors["accent"])
 
 
-        ttk.Label(hero, text="Edith Neural Console", style="Title.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(hero, text="EDITH ORBIT", style="Title.TLabel").grid(row=0, column=0, sticky="w")
         hero_subtitle = ttk.Label(
             hero,
-            text="Isometric 3D Glass HUD  \u2022  Intelligence Level: JARVIS-75  \u2022  Multi-Axis Visualization",
+            text="Speak to automate everything  ·  100% local  ·  Ultra-low latency",
             style="Sub.TLabel",
         )
-        hero_subtitle.grid(row=1, column=0, sticky="w", pady=(6, 0))
+        hero_subtitle.grid(row=1, column=0, sticky="w", pady=(4, 0))
         
         btn_bar = tk.Frame(hero, bg=self._colors["hero"])
         btn_bar.grid(row=2, column=0, sticky="w", pady=(18, 0))
         self._action_buttons = [
-            self._create_primary_button(btn_bar, "Voice Control", self._toggle_wake_mode),
-            self._create_primary_button(btn_bar, "Task Dashboard", self._open_task_dashboard),
-            self._create_primary_button(btn_bar, "Cowork Sync", lambda: self._preset("cowork sync")),
+            self._create_primary_button(btn_bar, "Talk", self._toggle_wake_mode),
+            self._create_primary_button(btn_bar, "Tasks", self._open_task_dashboard),
+            self._create_primary_button(btn_bar, "Cowork", lambda: self._preset("cowork sync")),
         ]
         self._action_buttons[0].pack(side="left", padx=(0, 10))
         self._action_buttons[1].pack(side="left", padx=(0, 10))
@@ -386,7 +392,7 @@ class EdithDesktopUI:
         # Depth Layering via border
         chat_card.configure(borderwidth=1, relief="ridge")
         
-        ttk.Label(chat_card, text="Intelligence Output stream", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(chat_card, text="Live transcript", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
 
         self.chat_log = tk.Text(
             chat_card,
@@ -395,16 +401,20 @@ class EdithDesktopUI:
             insertbackground=self._colors["text"],
             relief="flat",
             wrap="word",
-            font=("Consolas", 11),
-            padx=14, pady=14,
-            spacing1=3, spacing2=3, spacing3=8,
+            font=("Segoe UI", 12),
+            padx=16, pady=16,
+            spacing1=4, spacing2=2, spacing3=10,
             selectbackground="#1e4d73",
             selectforeground=self._colors["accent"],
         )
         self.chat_log.grid(row=1, column=0, sticky="nsew", pady=(10, 12))
         self.chat_log.configure(state="disabled")
-        self.chat_log.tag_configure("user_hdr", foreground=self._colors["accent"], font=("Consolas Bold", 11))
-        self.chat_log.tag_configure("edith_hdr", foreground=self._colors["success"], font=("Consolas Bold", 11))
+        # Configure tags once here — not on every message
+        self.chat_log.tag_configure("user_hdr", foreground=self._colors["accent"], font=("Segoe UI Bold", 12))
+        self.chat_log.tag_configure("edith_hdr", foreground=self._colors["success"], font=("Segoe UI Bold", 12))
+        self.chat_log.tag_configure("sys_hdr", foreground=self._colors["warn"], font=("Segoe UI Bold", 11))
+        self.chat_log.tag_configure("ts", foreground=self._colors["muted"], font=("Segoe UI", 9))
+        self.chat_log.tag_configure("body", foreground=self._colors["text"], font=("Segoe UI", 12))
 
         input_frame = ttk.Frame(chat_card, style="Card.TFrame")
         input_frame.grid(row=2, column=0, sticky="ew")
@@ -415,14 +425,14 @@ class EdithDesktopUI:
             textvariable=self.input_var,
             bg=self._colors["entry"],
             fg=self._colors["text"],
-            insertbackground=self._colors["text"],
+            insertbackground=self._colors["accent"],
             relief="flat",
-            font=("Segoe UI", 12),
-            highlightthickness=1,
+            font=("Segoe UI", 13),
+            highlightthickness=2,
             highlightbackground=self._colors["line"],
             highlightcolor=self._colors["accent"],
         )
-        self.command_entry.grid(row=0, column=0, sticky="ew", ipady=12)
+        self.command_entry.grid(row=0, column=0, sticky="ew", ipady=14)
         self.command_entry.bind("<Return>", lambda event: self._submit())
         
         self._execute_button = self._create_primary_button(input_frame, "Execute", self._submit)
@@ -553,18 +563,29 @@ class EdithDesktopUI:
     def _tick_entry_glow(self, now: float) -> None:
         if not self.command_entry:
             return
-        base = self._colors["line"]
-        accent = base
-        pulse = (sin(now * 4.6) + 1.0) * 0.5
+            
+        if not hasattr(self, '_current_glow_color'):
+            self._current_glow_color = self._colors["line"]
+
+        pulse = (sin(now * 3.0) + 1.0) * 0.5
+        target_color = self._colors["line"]
+        intensity = 0.0
+
         if self.voice_state == "listening":
-            accent = self._blend_color(self._colors["line"], self._colors["accent_soft"], 0.55 + (0.35 * pulse))
+            target_color = self._colors["accent_soft"]
+            intensity = 0.55 + (0.35 * pulse)
         elif self.voice_state == "thinking":
-            accent = self._blend_color(self._colors["line"], self._colors["warn"], 0.58 + (0.34 * pulse))
+            target_color = self._colors["warn"]
+            intensity = 0.58 + (0.34 * pulse)
         elif self.voice_state == "speaking":
-            accent = self._blend_color(self._colors["line"], self._colors["success"], 0.55 + (0.35 * pulse))
+            target_color = self._colors["success"]
+            intensity = 0.55 + (0.35 * pulse)
+
+        ideal_color = self._blend_color(self._colors["line"], target_color, intensity) if intensity > 0 else self._colors["line"]
+        self._current_glow_color = self._blend_color(self._current_glow_color, ideal_color, 0.15)
 
         try:
-            self.command_entry.configure(highlightbackground=accent, highlightcolor=accent, insertbackground=self._colors["text"])
+            self.command_entry.configure(highlightbackground=self._current_glow_color, highlightcolor=self._current_glow_color, insertbackground=self._colors["text"])
         except Exception:
             pass
 
@@ -662,7 +683,7 @@ class EdithDesktopUI:
         presence = ttk.Frame(sidebar, style="Card.TFrame", padding=18)
         presence.grid(row=0, column=0, sticky="ew", padx=16, pady=16)
         presence.configure(borderwidth=1, relief="ridge")
-        ttk.Label(presence, text="Neural Core Presence", style="CardTitle.TLabel").pack(anchor="w")
+        ttk.Label(presence, text="ORBIT Core", style="CardTitle.TLabel").pack(anchor="w")
         
         self.voice_canvas = tk.Canvas(
             presence, width=280, height=240, bg=self._colors["card"],
@@ -670,8 +691,12 @@ class EdithDesktopUI:
         )
         self.voice_canvas.pack(pady=10)
         
-        tk.Label(presence, textvariable=self.voice_state_label_var, bg=self._colors["card"], 
+        tk.Label(presence, textvariable=self.voice_state_label_var, bg=self._colors["card"],
                  fg=self._colors["accent_soft"], font=("Segoe UI Bold", 10)).pack()
+        tk.Label(
+            presence, textvariable=self.partial_var, bg=self._colors["card"],
+            fg=self._colors["muted"], font=("Segoe UI", 9), wraplength=250, justify="center",
+        ).pack(pady=(4, 0))
         
         # Intelligence Context
         mission = ttk.Frame(sidebar, style="Card.TFrame", padding=18)
@@ -686,15 +711,15 @@ class EdithDesktopUI:
     def _build_cards(self, parent: ttk.Frame) -> None:
         row = 0
         for title, var in [
-            ("Intelligence Insights", self.quick_var),
-            ("Neural Pipeline", self.cowork_var),
+            ("Insights", self.quick_var),
+            ("Agent pipeline", self.cowork_var),
             ("System Health", self.entity_var)
         ]:
-            card = ttk.Frame(parent, style="Card.TFrame", padding=16)
-            card.grid(row=row, column=0, sticky="nsew", pady=(0, 12))
+            card = ttk.Frame(parent, style="Card.TFrame", padding=14)
+            card.grid(row=row, column=0, sticky="nsew", pady=(0, 10))
             card.configure(borderwidth=1, relief="ridge")
             ttk.Label(card, text=title, style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
-            ttk.Label(card, textvariable=var, style="CardBody.TLabel", wraplength=320, justify="left").grid(row=1, column=0, sticky="w", pady=(10, 0))
+            ttk.Label(card, textvariable=var, style="CardBody.TLabel", wraplength=310, justify="left").grid(row=1, column=0, sticky="w", pady=(6, 0))
             row += 1
 
     # ── Isometric 3D Engine ───────────────────────────────────────────────────
@@ -704,28 +729,53 @@ class EdithDesktopUI:
         if not self.voice_canvas: return
         self.voice_canvas.delete("sphere")
         
-        self._rotation_angle += 0.024
+        # State-driven dynamics with smooth interpolation
+        if not hasattr(self, '_current_speed_mult'):
+            self._current_speed_mult = 1.0
+            
+        target_mult = 1.0
+        if self.processing: target_mult = 2.8
+        elif self.voice_state == "listening": target_mult = 4.5
+        
+        self._current_speed_mult += (target_mult - self._current_speed_mult) * 0.1
+        
+        self._rotation_angle += 0.024 * self._current_speed_mult
         cx, cy = 140, 120
         radius = 85
         
-        # State-driven dynamics
-        speed_mult = 1.0
-        if self.processing: speed_mult = 2.8
-        elif self.voice_state == "listening": speed_mult = 4.5
-        
-        angle = self._rotation_angle * speed_mult
+        angle = self._rotation_angle
         
         # 3 Orthogonal Rings (X, Y, Z axes rotation simulation)
         self._draw_isometric_ring(cx, cy, radius, angle, 0.2, self._colors["accent"], 3)
         self._draw_isometric_ring(cx, cy, radius, angle + pi/2, 1.1, self._colors["accent_soft"], 2)
         self._draw_isometric_ring(cx, cy, radius, angle * 0.7, 0.6, self._colors["success"], 1)
-        
+        self._draw_waveform_bars(cx, cy + 72)
+
         # Central Core (Pulsing)
         pulse = (sin(time.time() * 4) + 1) * 6
         self.voice_canvas.create_oval(cx-18-pulse, cy-18-pulse, cx+18+pulse, cy+18+pulse, 
                                      fill=self._colors["accent"], stipple="gray25", tags="sphere")
         
         self._schedule(self._ui_motion_frame_ms, self._animate_sphere)
+
+    def _draw_waveform_bars(self, cx: int, base_y: int) -> None:
+        if not self.voice_canvas:
+            return
+        levels = list(self._waveform_levels)
+        if not levels:
+            return
+        bar_w = 5
+        gap = 2
+        total_w = len(levels) * (bar_w + gap)
+        start_x = cx - total_w // 2
+        for i, level in enumerate(levels):
+            h = int(min(42, max(3, level * 48)))
+            x0 = start_x + i * (bar_w + gap)
+            color = self._colors["accent"] if self.voice_state == "listening" else self._colors["accent_soft"]
+            self.voice_canvas.create_rectangle(
+                x0, base_y - h, x0 + bar_w, base_y,
+                fill=color, outline="", tags="sphere",
+            )
 
     def _draw_isometric_ring(self, cx, cy, radius, rotation, tilt, color, width) -> None:
         points = []
@@ -756,7 +806,10 @@ class EdithDesktopUI:
         self.assistant.set_ui_callback(self._update_ui_state)
         self.assistant.set_stream_callback(self._on_stream_token)
         self._refresh_status()
-        self.root.after(500, self._open_task_dashboard)
+        if self.assistant.config.open_task_dashboard_on_start:
+            self.root.after(500, self._open_task_dashboard)
+        if self.assistant.config.auto_listen:
+            self.root.after(900, self._toggle_wake_mode)
 
     def _update_ui_state(self, key: str, value: Any) -> None:
         if key == "processing":
@@ -764,9 +817,12 @@ class EdithDesktopUI:
             self._set_voice_state("thinking" if value else ("listening" if self.voice_enabled else "idle"))
         elif key == "voice_state":
             self._set_voice_state(str(value))
+        elif key == "wake":
+            self.partial_var.set("Wake detected — listening…")
+            self._set_voice_state("listening")
 
     def _on_suggestion(self, text: str) -> None:
-        self.quick_var.set(f"JARVIS: {text}")
+        self.quick_var.set(text)
 
     def _on_stream_token(self, token: str) -> None:
         self.root.after(0, lambda: self._handle_stream_token(token))
@@ -781,25 +837,33 @@ class EdithDesktopUI:
     def _flush_stream_buffer(self) -> None:
         self._stream_flush_scheduled = False
         if not self.chat_log or not self._stream_token_buffer: return
-        
+
         self.chat_log.configure(state="normal")
         if not getattr(self, "_is_streaming_reply", False):
             self._is_streaming_reply = True
-            self.chat_log.insert("end", "EDITH: ", "edith_hdr")
-            
+            # Write header with timestamp matching _append_log format
+            ts = datetime.now().strftime("%H:%M")
+            self.chat_log.insert("end", f"[{ts}] ", "ts")
+            self.chat_log.insert("end", "EDITH", "edith_hdr")
+            self.chat_log.insert("end", "  ", "body")
+
         text_chunk = "".join(self._stream_token_buffer)
         self._stream_token_buffer.clear()
-        
-        self.chat_log.insert("end", text_chunk)
+
+        self.chat_log.insert("end", text_chunk, "body")
         self.chat_log.see("end")
         self.chat_log.configure(state="disabled")
 
+
     def _submit(self) -> None:
+        if self.processing:
+            return
         cmd = self.input_var.get().strip()
         if not cmd: return
         self.input_var.set("")
         self._append_log("USER", cmd)
         self.processing = True
+        self._command_idle.clear()
         self._set_voice_state("thinking")
         self._is_streaming_reply = False
         threading.Thread(target=self._execute, args=(cmd,), daemon=True).start()
@@ -809,28 +873,38 @@ class EdithDesktopUI:
             res = self.assistant.handle(cmd)
             self.root.after(0, lambda: self._handle_result(res))
         except Exception as exc:
-            self.root.after(0, lambda: self._handle_execution_error(exc))
+            self.root.after(0, lambda e=exc: self._handle_execution_error(e))
 
     def _handle_execution_error(self, exc: Exception) -> None:
         self.processing = False
+        self._command_idle.set()
         self._set_voice_state("listening" if self.voice_enabled else "idle")
         self._append_log("ERROR", f"Command failed: {exc}")
 
     def _handle_result(self, res: CommandResult | None) -> None:
         self.processing = False
+        self._command_idle.set()
         if res is None:
-            # End of stream, flush newline
-            if getattr(self, "_is_streaming_reply", False):
-                self.chat_log.configure(state="normal")
-                self.chat_log.insert("end", "\n")
-                self.chat_log.configure(state="disabled")
-                self._is_streaming_reply = False
             return
 
-        if res.metadata.get("streamed_reply") == "1" and getattr(self, "_is_streaming_reply", False):
-            self.chat_log.configure(state="normal")
-            self.chat_log.insert("end", "\n")
-            self.chat_log.configure(state="disabled")
+        # If reply was already streamed token-by-token to the chat log,
+        # skip _append_log entirely to prevent the double-message.
+        # The metadata sentinel is set synchronously BEFORE this callback fires,
+        # so this check is race-free unlike checking _is_streaming_reply.
+        already_streamed = res.metadata.get("streamed_reply") == "1"
+
+        if already_streamed:
+            # Just ensure the streamed text ends with a newline
+            if self.chat_log:
+                try:
+                    self.chat_log.configure(state="normal")
+                    # Only add newline if the last char isn't already one
+                    last = self.chat_log.get("end-2c", "end-1c")
+                    if last and last != "\n":
+                        self.chat_log.insert("end", "\n")
+                    self.chat_log.configure(state="disabled")
+                except Exception:
+                    pass
             self._is_streaming_reply = False
         else:
             self._append_log("EDITH", res.reply)
@@ -847,13 +921,25 @@ class EdithDesktopUI:
     def _append_log(self, author: str, text: str) -> None:
         if not self.chat_log: return
         self.chat_log.configure(state="normal")
-        tag = "user" if author == "USER" else "edith"
-        self.chat_log.insert("end", f"{author}: ", tag + "_hdr")
-        self.chat_log.insert("end", f"{text}\n")
-        self.chat_log.tag_configure("user_hdr", foreground=self._colors["accent"], font=("Consolas Bold", 11))
-        self.chat_log.tag_configure("edith_hdr", foreground=self._colors["success"], font=("Consolas Bold", 11))
+        ts = datetime.now().strftime("%H:%M")
+        if author == "USER":
+            self.chat_log.insert("end", f"[{ts}] ", "ts")
+            self.chat_log.insert("end", "YOU  ", "user_hdr")
+        elif author == "EDITH":
+            self.chat_log.insert("end", f"[{ts}] ", "ts")
+            self.chat_log.insert("end", "EDITH", "edith_hdr")
+        else:
+            self.chat_log.insert("end", f"[{ts}] ", "ts")
+            self.chat_log.insert("end", f"{author} ", "sys_hdr")
+        self.chat_log.insert("end", f"  {text}\n", "body")
         self.chat_log.see("end")
         self.chat_log.configure(state="disabled")
+        # Trim log to max lines
+        line_count = int(self.chat_log.index("end-1c").split(".")[0])
+        if line_count > self._max_chat_lines:
+            self.chat_log.configure(state="normal")
+            self.chat_log.delete("1.0", f"{line_count - self._max_chat_lines}.0")
+            self.chat_log.configure(state="disabled")
 
     def _preset(self, cmd: str) -> None:
         self.input_var.set(cmd)
@@ -862,6 +948,8 @@ class EdithDesktopUI:
     def _toggle_wake_mode(self) -> None:
         self.voice_enabled = not self.voice_enabled
         if self.voice_enabled:
+            self.assistant.voice.on_partial = lambda t: self.voice_queue.put(("partial", t))
+            self.assistant.voice.on_energy = lambda e: self.voice_queue.put(("energy", str(e)))
             self.assistant.start_voice_session()
             self.stop_event.clear()
             self._set_voice_state("listening")
@@ -879,15 +967,22 @@ class EdithDesktopUI:
         self.assistant.open_task_dashboard(self.root)
 
     def _refresh_status(self) -> None:
-        cpu = int(sin(time.time()*0.3)*4 + 8)
+        try:
+            import psutil
+            cpu = int(psutil.cpu_percent(interval=None))
+            ram = psutil.virtual_memory()
+            ram_pct = int(ram.percent)
+            health = f"CPU {cpu}%  ·  RAM {ram_pct}%"
+        except Exception:
+            health = "System metrics unavailable"
         next_task = self.assistant.task_manager.next_task()
         if next_task is not None:
-            self.health_var.set(f"Neural Load: {cpu}%  |  Next task: {next_task.title}")
+            self.health_var.set(f"{health}  ·  Next: {next_task.title}")
             self.cowork_var.set(self.assistant.task_manager.cowork_summary())
         else:
-            self.health_var.set(f"Neural Load: {cpu}%  |  All tasks clear")
-        self.status_var.set(f"Edith Core 2.4 | Active | {datetime.now().strftime('%H:%M:%S')}")
-        self._schedule(3000, self._refresh_status)
+            self.health_var.set(f"{health}  ·  All tasks clear")
+        self.status_var.set(f"EDITH Core  ·  Active  ·  {datetime.now().strftime('%H:%M:%S')}")
+        self._schedule(5000, self._refresh_status)
 
     def _process_voice_queue(self) -> None:
         try:
@@ -901,10 +996,17 @@ class EdithDesktopUI:
                         self._submit()
                 elif qtype == "voice_state":
                     self._set_voice_state(val)
+                elif qtype == "partial":
+                    self.partial_var.set(val[:120])
+                elif qtype == "energy":
+                    try:
+                        self._waveform_levels.append(float(val))
+                    except ValueError:
+                        pass
                 elif qtype == "system":
                     self._append_log("SYSTEM", str(val))
         except queue.Empty: pass
-        self._schedule(100, self._process_voice_queue)
+        self._schedule(self._voice_poll_ms, self._process_voice_queue)
 
     def _focus_command_entry(self) -> None:
         if self.command_entry: self.command_entry.focus_set()
@@ -913,8 +1015,7 @@ class EdithDesktopUI:
         wake_word = self.assistant.config.wake_word.lower()
         while self.voice_enabled and not self.stop_event.is_set() and not self._closed:
             try:
-                if self.processing:
-                    time.sleep(0.15)
+                if not self._command_idle.wait(timeout=0.02):
                     continue
                 
                 is_speaking = self.assistant.audio.is_speaking
@@ -945,10 +1046,21 @@ class EdithDesktopUI:
                         # We'll let it pass through to the normal logic.
                         self.assistant.audio.stop()
                 
-                if self.assistant.config.require_wake_word and not is_speaking:
-                    if wake_word not in lowered:
+                if (
+                    self.assistant.config.require_wake_word
+                    and not is_speaking
+                    and not getattr(self.assistant.voice, "_command_armed", True)
+                ):
+                    if wake_word not in lowered and not any(
+                        w in lowered for w in self.assistant.config.wake_keyword_list()
+                    ):
                         continue
-                    heard = lowered.replace(wake_word, "", 1).strip()
+                    for kw in self.assistant.config.wake_keyword_list():
+                        if kw in lowered:
+                            heard = lowered.replace(kw, "", 1).strip()
+                            break
+                    else:
+                        heard = lowered.replace(wake_word, "", 1).strip()
                     if not heard:
                         continue
                         
@@ -958,11 +1070,17 @@ class EdithDesktopUI:
                         self.voice_queue.put(("system", f"Low-confidence voice input ignored: {heard}"))
                         continue
                         
+                self.partial_var.set("")
                 self.voice_queue.put(("transcript", heard))
                 self.voice_queue.put(("voice_command", heard))
+                if (
+                    self.assistant.config.wake_engine_enabled
+                    and self.assistant.config.always_listen_wake
+                ):
+                    self.assistant.voice.disarm_command_window()
             except Exception as exc:
                 self.voice_queue.put(("system", f"Voice loop recovered: {exc}"))
-                time.sleep(0.4)
+                time.sleep(0.12)
 
     def _set_voice_state(self, state: str) -> None:
         state = state.lower().strip()
@@ -978,7 +1096,7 @@ class EdithDesktopUI:
             "thinking": "THINKING",
             "speaking": "SPEAKING",
         }[state]
-        self.voice_state_label_var.set(f"STATE: {label}")
+        self.voice_state_label_var.set(f"ORBIT · {label}")
         self.loading_var.set("Thinking..." if state == "thinking" else ("Speaking..." if state == "speaking" else ""))
 
     def _toggle_immersive_mode(self) -> None: pass

@@ -18,13 +18,16 @@ class ProactiveLoop:
         task_queue: TaskQueue,
         on_suggestion: Callable[[str], None],
         task_manager: "TaskEngine | None" = None,
+        interval_seconds: int = 600,
+        initial_delay_seconds: int = 30,
     ):
         self._task_queue = task_queue
         self._task_manager = task_manager
         self._on_suggestion = on_suggestion
         self._is_running = False
         self._thread: threading.Thread | None = None
-        self._interval_seconds = 600  # Low frequency: 10 minutes
+        self._interval_seconds = max(120, int(interval_seconds))
+        self._initial_delay_seconds = max(5, int(initial_delay_seconds))
         self._last_suggestion: str = ""
 
     def start(self) -> None:
@@ -38,7 +41,7 @@ class ProactiveLoop:
         self._is_running = False
 
     def _loop(self) -> None:
-        time.sleep(30)
+        time.sleep(self._initial_delay_seconds)
         while self._is_running:
             try:
                 self._analyze_current_state()

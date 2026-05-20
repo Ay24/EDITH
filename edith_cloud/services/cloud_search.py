@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from typing import Any
+import time
 
 logger = logging.getLogger("edith.cloud_search")
 
@@ -38,7 +39,8 @@ class CloudSearchService:
     """
 
     def __init__(self) -> None:
-        self._cache: dict[str, list[SearchHit]] = {}
+        self._cache: dict[str, tuple[float, list[SearchHit]]] = {}
+        self._cache_ttl_sec = 300.0
 
     def summarize_query(self, query: str, limit: int = 5, domain: str | None = None) -> str:
         hits = self.search(query, limit=limit, domain=domain)
@@ -52,9 +54,10 @@ class CloudSearchService:
 
     def search(self, query: str, limit: int = 5, domain: str | None = None) -> list[SearchHit]:
         key = f"{domain or ''}::{query.lower().strip()}::{limit}"
+        now = time.time()
         cached = self._cache.get(key)
-        if cached is not None:
-            return cached
+        if cached is not None and (now - cached[0]) < self._cache_ttl_sec:
+            return cached[1]
 
         if DDGS is None:
             logger.warning("duckduckgo-search not installed. Falling back to empty results.")
@@ -75,7 +78,7 @@ class CloudSearchService:
         except Exception as exc:
             logger.warning("DuckDuckGo search failed: %s", exc)
 
-        self._cache[key] = hits
+        self._cache[key] = (now, hits)
         if len(self._cache) > 64:
             self._cache.pop(next(iter(self._cache)), None)
         return hits

@@ -112,7 +112,8 @@ class MediaService:
         if pyautogui is None:
             return True
         try:
-            time.sleep(2.2)
+            delay = getattr(getattr(self._config, "automation_timing", None), "media_open_delay", 2.2)
+            time.sleep(delay)
             pyautogui.press("tab")
             pyautogui.press("enter")
             return True

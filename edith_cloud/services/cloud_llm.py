@@ -13,11 +13,9 @@ from __future__ import annotations
 import json
 import logging
 import threading
-import time
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Iterable, Any
-
-import requests
 
 from edith_app.config import AppConfig
 from edith_app.models import ChatMessage
@@ -198,9 +196,15 @@ class CloudLLMService:
         )
 
     def think_with_user(self, prompt: str, history: Iterable[ChatMessage], context_kwargs: dict[str, str] | None = None) -> str:
-        planner = self.plan(prompt, history, context_kwargs=context_kwargs)
-        creative = self.brainstorm(prompt, history, context_kwargs=context_kwargs)
-        tactical = self.quick_think(prompt, history, context_kwargs=context_kwargs)
+        # Parallelize multi-lens thinking to reduce total latency.
+        history_list = list(history)
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            planner_f = pool.submit(self.plan, prompt, history_list, context_kwargs)
+            creative_f = pool.submit(self.brainstorm, prompt, history_list, context_kwargs)
+            tactical_f = pool.submit(self.quick_think, prompt, history_list, context_kwargs)
+            planner = planner_f.result()
+            creative = creative_f.result()
+            tactical = tactical_f.result()
         return (
             "Planner view:\n"
             f"{planner}\n\n"

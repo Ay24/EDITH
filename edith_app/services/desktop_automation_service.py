@@ -30,10 +30,14 @@ class DesktopAutomationService:
     - Fall back to direct filesystem writes when GUI automation is unavailable.
     """
 
-    def __init__(self, system: SystemService) -> None:
+    def __init__(self, system: SystemService, timing: object | None = None) -> None:
         self._system = system
+        self._timing = timing
         self._home = Path.home()
         self._default_dir = self._home / "Desktop"
+
+    def _delay(self, name: str, default: float) -> float:
+        return float(getattr(self._timing, name, default)) if self._timing else default
 
     def can_handle(self, command: str) -> bool:
         lowered = command.lower().strip()
@@ -210,18 +214,18 @@ class DesktopAutomationService:
 
         open_target = "vscode" if app == "vs code" else app
         self._system.open_target(open_target)
-        time.sleep(1.1)
+        time.sleep(self._delay("desktop_open_delay", 1.1))
         pyautogui.FAILSAFE = False
         try:
             pyautogui.hotkey("ctrl", "n")
-            time.sleep(0.2)
+            time.sleep(self._delay("desktop_focus_delay", 0.2))
             if content:
                 pyautogui.write(content, interval=0.006)
             pyautogui.hotkey("ctrl", "s")
-            time.sleep(0.4)
+            time.sleep(self._delay("desktop_type_delay", 0.4))
             pyautogui.write(str(destination), interval=0.008)
             pyautogui.press("enter")
-            time.sleep(0.55)
+            time.sleep(self._delay("desktop_save_delay", 0.55))
             if destination.exists():
                 return f"Created {destination.name} in {destination.parent} using {app}."
             return ""

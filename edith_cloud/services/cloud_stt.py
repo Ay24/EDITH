@@ -12,15 +12,13 @@ Falls back to local VoiceService if Groq is unavailable.
 from __future__ import annotations
 
 import io
-import json
 import logging
 import queue
 import struct
-import tempfile
 import threading
 import time
 import wave
-from pathlib import Path
+import audioop
 from typing import Any
 
 logger = logging.getLogger("edith.cloud_stt")
@@ -273,12 +271,17 @@ class CloudSTTService:
     @staticmethod
     def _rms(data: bytes) -> float:
         """Compute RMS energy of 16-bit PCM audio."""
-        count = len(data) // 2
-        if count == 0:
+        if not data:
             return 0.0
-        shorts = struct.unpack(f"<{count}h", data)
-        sum_sq = sum(s * s for s in shorts)
-        return (sum_sq / count) ** 0.5
+        try:
+            return float(audioop.rms(data, 2))
+        except Exception:
+            count = len(data) // 2
+            if count == 0:
+                return 0.0
+            shorts = struct.unpack(f"<{count}h", data)
+            sum_sq = sum(s * s for s in shorts)
+            return (sum_sq / count) ** 0.5
 
     def _normalize(self, text: str) -> str:
         lowered = " ".join(text.strip().split()).lower()

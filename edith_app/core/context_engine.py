@@ -24,7 +24,7 @@ class ContextEngine:
         # 1. System state
         parts = [
             f"Current Time: {timestamp}",
-            f"Assistant Mode: JARVIS (75% Active)",
+            f"Assistant Mode: EDITH ORBIT (local, full capability)",
             f"Workspace Root: {self._config.project_root.name}",
         ]
         

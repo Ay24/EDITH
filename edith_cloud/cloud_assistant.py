@@ -13,9 +13,9 @@ completely untouched — we just swap the service backends.
 from __future__ import annotations
 
 import logging
+import os
 import sys
 import traceback
-import tkinter as tk
 
 from edith_cloud.config import CloudConfig
 from edith_cloud.services.cloud_llm import CloudLLMService
@@ -25,11 +25,11 @@ from edith_cloud.services.cloud_search import CloudSearchService
 from edith_cloud.services.cloud_image_gen import CloudImageGenService
 from edith_cloud.services.cloud_vision import CloudVisionService
 from edith_cloud.cloud_router import CloudNeuralRouter
+from edith_cloud.cloud_web import serve_cloud_web
 
 from edith_app.assistant import EdithAssistant
 from edith_app.services.bootstrap_service import BootstrapService
 from edith_app.services.logging_service import get_logger
-from edith_app.ui import EdithDesktopUI
 
 logger = logging.getLogger("edith.cloud")
 
@@ -101,16 +101,28 @@ def build_cloud_assistant(config: CloudConfig) -> EdithAssistant:
     # 9. Update the cowork agent loop to use cloud LLM
     assistant.cowork._agent = assistant.agent
 
+    # 10. Cloud preflight diagnostics for observability in UI/logs
+    preflight = {
+        "llm": bool(getattr(assistant.agent, "enabled", False)),
+        "stt": bool(getattr(assistant.voice, "enabled", False)),
+        "tts": bool(getattr(assistant.audio, "tts_enabled", False)),
+        "vision": bool(getattr(assistant.vision, "enabled", False)),
+        "search": bool(getattr(assistant, "cloud_search", None) is not None),
+        "image_gen": bool(getattr(assistant, "image_gen", None) is not None),
+    }
+    assistant.cloud_preflight = preflight
+    logger.info("Cloud preflight: %s", preflight)
+
     return assistant
 
 
 def main() -> None:
     """Cloud-mode entry point — mirrors edith_app.app.main()."""
-
-    root = tk.Tk()
-    root.withdraw()
-
     config = CloudConfig()
+    # Cloud UX runtime tuning (cloud mode only).
+    config.ui_stream_flush_ms = min(config.ui_stream_flush_ms, 20)
+    config.ui_alpha = max(0.96, config.ui_alpha)
+    config.voice_confidence_threshold = min(0.55, max(0.35, config.voice_confidence_threshold))
     log = get_logger("edith.cloud_app", config.runtime_log_path)
 
     def _handle_uncaught(exc_type, exc_value, exc_tb) -> None:
@@ -143,6 +155,10 @@ def main() -> None:
     bootstrap.start_async()
 
     assistant = build_cloud_assistant(config)
+    # Browser-driven audio avoids fragile desktop audio device paths in cloud mode.
+    assistant.speak = lambda _text: None
 
-    ui = EdithDesktopUI(assistant, root=root)
-    ui.run()
+    host = os.getenv("EDITH_CLOUD_WEB_HOST", "127.0.0.1")
+    port = int(os.getenv("EDITH_CLOUD_WEB_PORT", "8765"))
+    auto_open = os.getenv("EDITH_CLOUD_WEB_OPEN", "1") != "0"
+    serve_cloud_web(assistant, host=host, port=port, auto_open=auto_open)

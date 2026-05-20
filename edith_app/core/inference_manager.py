@@ -28,9 +28,9 @@ class HardwareProfile:
     n_threads_offset: int
 
 PROFILES = {
-    "ultra_stable": HardwareProfile("Ultra Stable", 2048, 1024, 128, -4),
-    "balanced": HardwareProfile("Balanced", 2500, 2048, 256, -2),
-    "performance": HardwareProfile("Performance", 3200, 4096, 512, -1)
+    "ultra_stable": HardwareProfile("Ultra Stable", 1200, 1024, 128, -4),
+    "balanced":     HardwareProfile("Balanced",     1600, 2048, 256, -2),
+    "performance":  HardwareProfile("Performance",  2400, 4096, 512, -1),
 }
 
 class AdaptiveLlamaEngine:
@@ -97,49 +97,71 @@ class AdaptiveLlamaEngine:
 
     def _load_model(self):
         if not Llama:
-            logger.error("llama-cpp-python not installed. Cannot load native model.")
-            return
-            
+            raise RuntimeError("llama-cpp-python not installed. Cannot load native model.")
+
         state = self.get_hardware_state()
-        
-        # Never exceed the profile's max VRAM, but also respect actual available VRAM
-        safe_vram = min(self._current_profile.max_vram_mb, state["vram_free"] - 500) # Leave 500MB OS headroom
-        if safe_vram < 0: safe_vram = 0
-        
+        safe_vram = min(self._current_profile.max_vram_mb, max(0, state["vram_free"] - 500))
         self._gpu_layers = self._calculate_safe_layers(safe_vram)
-        
+
         cpu_count = os.cpu_count() or 4
         n_threads = max(2, cpu_count + self._current_profile.n_threads_offset)
 
-        logger.info(f"Loading {self.model_path} [Profile: {self._current_profile.name}]")
-        logger.info(f"Config: n_ctx={self._current_profile.n_ctx}, layers={self._gpu_layers}, threads={n_threads}")
+        logger.info(f"Loading model: {self.model_path}")
+        logger.info(f"Profile={self._current_profile.name}, n_ctx={self._current_profile.n_ctx}, "
+                    f"n_gpu_layers={self._gpu_layers}, n_threads={n_threads}")
 
-        self._llm = Llama(
+        base_kwargs = dict(
             model_path=self.model_path,
-            n_gpu_layers=self._gpu_layers,
             n_ctx=self._current_profile.n_ctx,
             n_batch=self._current_profile.n_batch,
             n_threads=n_threads,
-            use_mmap=True,
-            use_mlock=False, # True causes severe OS lag if RAM is tight
-            flash_attn=True,
-            type_k=8, # q8_0 KV cache
-            type_v=8,
-            verbose=False
+            use_mmap=False,   # Safer on Windows — mmap can cause file-lock issues
+            use_mlock=False,
+            verbose=False,
         )
 
-    def generate(self, prompt: str, max_tokens: int = 512, stop=None, stream: bool = True):
+        # Try with GPU layers first, fall back to CPU-only if it fails
+        for gpu_layers in [self._gpu_layers, 0]:
+            failed_llm = None
+            try:
+                self._llm = Llama(**base_kwargs, n_gpu_layers=gpu_layers)
+                logger.info(f"Model loaded successfully (n_gpu_layers={gpu_layers})")
+                return
+            except Exception as e:
+                logger.warning(f"Model load failed with n_gpu_layers={gpu_layers}: {e}")
+                # Capture the failed partial object and delete it explicitly
+                # to avoid the 'LlamaModel has no attribute sampler' __del__ error
+                failed_llm = self._llm
+                self._llm = None
+            finally:
+                if failed_llm is not None:
+                    try:
+                        del failed_llm
+                    except Exception:
+                        pass
+
+        raise RuntimeError(f"Failed to load native model from {self.model_path} (tried GPU and CPU).")
+
+
+    def generate(self, prompt: str, max_tokens: int = 512, stop=None, stream: bool = False):
         if not self._llm:
-            self._load_model()
-            
-        if not self._llm:
-            raise RuntimeError("Native Llama engine failed to load.")
-            
+            self._load_model()  # raises on failure — no silent None return
+
         return self._llm(
             prompt,
             max_tokens=max_tokens,
             stop=stop or ["<|eot_id|>", "User:", "\n\nUser"],
-            stream=stream
+            stream=stream,
+        )
+
+    def chat_generate(self, messages: list[dict], max_tokens: int = 512, stream: bool = False):
+        if not self._llm:
+            self._load_model()
+
+        return self._llm.create_chat_completion(
+            messages=messages,
+            max_tokens=max_tokens,
+            stream=stream,
         )
 
     def set_profile(self, profile_name: str):
@@ -149,11 +171,21 @@ class AdaptiveLlamaEngine:
             self._llm = None # Force reload on next generation
             
     def shutdown(self):
+        """Release the model and free GPU VRAM."""
         self._running = False
-        if self._llm:
-            self._llm = None
+        llm = self._llm
+        self._llm = None
+        # Explicitly delete the Llama object so Python drops the ref count
+        # and the CUDA context is released before the next load attempt.
+        if llm is not None:
+            try:
+                del llm
+            except Exception:
+                pass
+        import gc
+        gc.collect()
         if pynvml:
             try:
                 pynvml.nvmlShutdown()
-            except:
+            except Exception:
                 pass

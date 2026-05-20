@@ -130,10 +130,13 @@ class BootstrapService:
         for model in warm_targets:
             try:
                 requests.post(
-                    f"{self._config.ollama_url}/api/generate",
+                    f"{self._config.ollama_url}/api/chat",
                     json={
                         "model": model,
-                        "prompt": "Reply with one word: ready.",
+                        "messages": [
+                            {"role": "system", "content": "You are EDITH, a helpful AI assistant."},
+                            {"role": "user", "content": "Reply with one word: ready."},
+                        ],
                         "stream": False,
                         "keep_alive": "10m",
                     },

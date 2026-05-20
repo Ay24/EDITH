@@ -63,6 +63,8 @@ class SystemService:
             "chrome": "chrome.exe", "google chrome": "chrome.exe", "microsoft edge": "msedge.exe", "edge": "msedge.exe",
             "firefox": "firefox.exe", "teams": "start msteams:", "microsoft teams": "start msteams:",
             "telegram": "start telegram:", "vlc": "vlc.exe", "vl": "vlc.exe",
+            # Opens the installed Spotify desktop app via URI protocol (NOT browser)
+            "spotify": "start spotify:",
         }
         self._app_paths = {
             "chrome": [
@@ -88,14 +90,20 @@ class SystemService:
                 Path(os.environ.get("ProgramFiles", "")) / "VideoLAN" / "VLC" / "vlc.exe",
                 Path(os.environ.get("ProgramFiles(x86)", "")) / "VideoLAN" / "VLC" / "vlc.exe",
             ],
+            # Spotify desktop app — checked before the URI protocol fallback in _known_apps
+            "spotify": [
+                Path(os.environ.get("APPDATA", "")) / "Spotify" / "Spotify.exe",
+                Path(os.environ.get("LOCALAPPDATA", "")) / "Spotify" / "Spotify.exe",
+            ],
         }
         self._known_sites = {
             "notebooklm": "https://notebooklm.google.com/", "github": "https://github.com/",
             "gmail": "https://mail.google.com/", "google docs": "https://docs.google.com/", "google drive": "https://drive.google.com/",
             "google calendar": "https://calendar.google.com/", "google maps": "https://maps.google.com/", "wikipedia": "https://wikipedia.org/",
-            "youtube": "https://www.youtube.com/", "spotify": "https://open.spotify.com/", "notion": "https://www.notion.so/",
+            "youtube": "https://www.youtube.com/", "notion": "https://www.notion.so/",
             "stackoverflow": "https://stackoverflow.com/", "whatsapp web": "https://web.whatsapp.com/",
             "amazon": "https://www.amazon.in/", "amazon.in": "https://www.amazon.in/",
+            # spotify intentionally removed — opens via desktop app URI now
         }
         self._search_cache: dict[tuple[str, str, int], tuple[float, list[str]]] = {}
         self._folder_analysis_cache: dict[tuple[str, str], tuple[float, str]] = {}

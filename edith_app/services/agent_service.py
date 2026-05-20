@@ -25,26 +25,45 @@ class AgentService:
         self._session.mount('http://', adapter)
         self._session.mount('https://', adapter)
         self._router = ModelRouter(config)
-        self._tags_cache: tuple[float, set[str]] = (0.0, set())
+        # Cache: (timestamp, set_of_model_names, server_is_up)
+        self._tags_cache: tuple[float, set[str], bool] = (0.0, set(), False)
+        self._tags_cache_ttl: float = 10.0  # seconds
         self._recovery_lock = threading.Lock()
         self._recovery_state: dict[str, float] = {}
         self._native_engine = None
         if os.getenv("EDITH_USE_NATIVE_LLM") == "1":
             try:
                 from edith_app.core.inference_manager import AdaptiveLlamaEngine
+                from pathlib import Path
                 model_path = os.getenv("EDITH_NATIVE_MODEL_PATH", "models/llama-3.2-3b.gguf")
+                # Auto-detect: if configured path doesn't exist, scan models/ for any .gguf
+                if not Path(model_path).exists():
+                    models_dir = Path("models")
+                    found = sorted(models_dir.glob("*.gguf")) if models_dir.exists() else []
+                    if found:
+                        model_path = str(found[0])
+                        self._logger.info(f"Auto-detected model: {model_path}")
+                    else:
+                        raise FileNotFoundError(f"No .gguf model found at '{model_path}' or in models/")
                 self._native_engine = AdaptiveLlamaEngine(model_path=model_path, profile_name="balanced")
+                self._logger.info(f"Native engine initialised with model: {model_path}")
             except Exception as e:
                 self._logger.error(f"Failed to load native engine: {e}")
 
     @property
     def enabled(self) -> bool:
+        # Native engine takes priority — if it's loaded, we are always enabled
+        if self._native_engine is not None:
+            return True
         return self._model_available(self._config.ollama_model)
 
     def runtime_status(self) -> tuple[bool, str]:
-        if not self._server_ready():
+        if self._native_engine is not None:
+            return True, "Native GGUF engine active"
+        server_up, names = self._fetch_tags()
+        if not server_up:
             return False, "Ollama server offline"
-        if not self._model_available(self._config.ollama_model):
+        if self._config.ollama_model not in names:
             return False, f"Model {self._config.ollama_model} not loaded"
         return True, f"Model {self._config.ollama_model} ready"
 
@@ -205,27 +224,26 @@ class AgentService:
         context_kwargs: dict[str, str] | None = None,
     ) -> str:
         if self._native_engine:
-            full_prompt = self._compose_prompt(system_instruction, prompt, history, context_kwargs)
-            try:
-                resp = self._native_engine.generate(full_prompt, max_tokens=max_predict, stream=False)
-                return resp['choices'][0]['text'].strip()
-            except Exception as e:
-                self._logger.error(f"Native engine failed: {e}")
-                return "The native LLM engine encountered an error."
+            messages = self._compose_messages(system_instruction, prompt, history, context_kwargs)
+            # Let exceptions propagate — caller (_safe_agent_reply) will catch and show a clean message
+            resp = self._native_engine.chat_generate(messages, max_tokens=max_predict, stream=False)
+            return resp['choices'][0]['message']['content'].strip()
 
-        if not self._server_ready():
+        server_up, names = self._fetch_tags()
+        if not server_up:
             self._logger.warning("ollama server not ready for model=%s", model)
             self._recover_async(model)
             return "Ollama is starting up. Keep Edith open for a moment and try again."
-        target_model = self._select_available_model(model)
-        if not self._model_available(target_model):
+        target_model = self._select_available_model_from(model, names)
+        if target_model not in names:
             self._logger.warning("ollama model missing model=%s", model)
             self._recover_async(model)
             return f"I am preparing the local model '{model}'. Keep Edith open and I will use it as soon as it finishes loading."
 
+
         payload = {
             "model": target_model,
-            "prompt": self._compose_prompt(system_instruction, prompt, history, context_kwargs),
+            "messages": self._compose_messages(system_instruction, prompt, history, context_kwargs),
             "stream": False,
             "keep_alive": "10m",
             "options": {
@@ -238,7 +256,7 @@ class AgentService:
         for attempt in range(2):
             try:
                 response = self._session.post(
-                    f"{self._config.ollama_url}/api/generate",
+                    f"{self._config.ollama_url}/api/chat",
                     json=payload,
                     timeout=timeout_seconds,
                 )
@@ -259,7 +277,7 @@ class AgentService:
                         continue
                     self._recover_async(model)
                     return f"The local model '{model}' returned an invalid response while warming up. Try again in a moment."
-                return data.get("response", "").strip() or "The local model returned an empty response."
+                return data.get("message", {}).get("content", "").strip() or "The local model returned an empty response."
             except requests.RequestException:
                 self._logger.warning("ollama request exception model=%s attempt=%s", model, attempt, exc_info=True)
                 if attempt == 0:
@@ -290,12 +308,13 @@ class AgentService:
         context_kwargs: dict[str, str] | None = None,
     ) -> str:
         if self._native_engine:
-            full_prompt = self._compose_prompt(system_instruction, prompt, history, context_kwargs)
+            messages = self._compose_messages(system_instruction, prompt, history, context_kwargs)
             try:
-                resp_stream = self._native_engine.generate(full_prompt, max_tokens=max_predict, stream=True)
+                resp_stream = self._native_engine.chat_generate(messages, max_tokens=max_predict, stream=True)
                 full_text = []
                 for chunk in resp_stream:
-                    token = chunk['choices'][0]['text']
+                    delta = chunk['choices'][0].get('delta', {})
+                    token = delta.get('content', '')
                     if token:
                         full_text.append(token)
                         if on_token:
@@ -305,19 +324,20 @@ class AgentService:
                 self._logger.error(f"Native engine stream failed: {e}")
                 return "The native LLM engine encountered an error."
 
-        if not self._server_ready():
+        server_up, names = self._fetch_tags()
+        if not server_up:
             self._logger.warning("ollama server not ready for streaming model=%s", model)
             self._recover_async(model)
             return "Ollama is starting up. Keep Edith open for a moment and try again."
-        target_model = self._select_available_model(model)
-        if not self._model_available(target_model):
+        target_model = self._select_available_model_from(model, names)
+        if target_model not in names:
             self._logger.warning("ollama stream model missing model=%s", model)
             self._recover_async(model)
             return f"I am preparing the local model '{model}'. Keep Edith open and I will use it as soon as it finishes loading."
 
         payload = {
             "model": target_model,
-            "prompt": self._compose_prompt(system_instruction, prompt, history, context_kwargs),
+            "messages": self._compose_messages(system_instruction, prompt, history, context_kwargs),
             "stream": True,
             "keep_alive": "10m",
             "options": {
@@ -330,7 +350,7 @@ class AgentService:
         chunks: list[str] = []
         try:
             with self._session.post(
-                f"{self._config.ollama_url}/api/generate",
+                f"{self._config.ollama_url}/api/chat",
                 json=payload,
                 timeout=(4, timeout_seconds),
                 stream=True,
@@ -347,7 +367,7 @@ class AgentService:
                         data = json.loads(line)
                     except json.JSONDecodeError:
                         continue
-                    token = data.get("response", "")
+                    token = data.get("message", {}).get("content", "")
                     if token:
                         chunks.append(token)
                         if on_token is not None:
@@ -379,7 +399,7 @@ class AgentService:
 
         return "".join(chunks).strip() or "The local model returned an empty response."
 
-    def _compose_prompt(self, system_instruction: str, prompt: str, history: Iterable[ChatMessage], context_kwargs: dict[str, str] | None = None) -> str:
+    def _compose_messages(self, system_instruction: str, prompt: str, history: Iterable[ChatMessage], context_kwargs: dict[str, str] | None = None) -> list[dict[str, str]]:
         from datetime import datetime
         now_dt = datetime.now()
         if context_kwargs:
@@ -407,25 +427,60 @@ class AgentService:
             f"- {time_note}\n"
         )
 
-        # ── Build conversation transcript ──────────────────────────────────────
-        transcript = []
+        messages = [
+            {"role": "system", "content": f"{system_instruction}\n\n{awareness_block}"}
+        ]
+
         for item in list(history)[-self._config.history_max_messages:]:
-            prefix = "YOU" if item.source == "user" else "EDITH"
-            transcript.append(f"{prefix}: {item.text}")
+            role = "user" if item.source == "user" else "assistant"
+            messages.append({"role": role, "content": item.text})
 
-        chat_history = "\n".join(transcript) if transcript else "No prior context this session."
+        messages.append({"role": "user", "content": prompt})
+        return messages
 
-        return (
-            f"{system_instruction}\n\n"
-            f"{awareness_block}\n"
-            "## Conversation History\n"
-            f"{chat_history}\n\n"
-            f"YOU: {prompt}\n"
-            "EDITH:"
-        )
+    def _fetch_tags(self) -> tuple[bool, set[str]]:
+        """Single cached GET /api/tags. Returns (server_up, model_names).
+        TTL = 10 s — amortizes cost across the entire ReAct loop."""
+        now = time.monotonic()
+        cached_at, cached_names, cached_up = self._tags_cache
+        if now - cached_at < self._tags_cache_ttl:
+            return cached_up, cached_names
+        try:
+            response = self._session.get(f"{self._config.ollama_url}/api/tags", timeout=2)
+            if not response.ok:
+                self._tags_cache = (now, set(), False)
+                return False, set()
+            data = response.json()
+            names: set[str] = set()
+            for item in data.get("models", []):
+                name = item.get("name", "")
+                if name:
+                    names.add(name)
+                    names.add(name.split(":", 1)[0])
+            self._tags_cache = (now, names, True)
+            return True, names
+        except requests.RequestException:
+            self._tags_cache = (now, set(), False)
+            return False, set()
+
+    def _server_ready(self) -> bool:
+        up, _ = self._fetch_tags()
+        return up
+
+    def _model_available(self, model: str) -> bool:
+        _, names = self._fetch_tags()
+        return model in names
+
+    def _available_models(self) -> set[str]:
+        _, names = self._fetch_tags()
+        return names
 
     def _select_available_model(self, requested: str) -> str:
-        if self._model_available(requested):
+        _, names = self._fetch_tags()
+        return self._select_available_model_from(requested, names)
+
+    def _select_available_model_from(self, requested: str, names: set[str]) -> str:
+        if requested in names:
             return requested
         for fallback in (
             self._config.creative_model,
@@ -433,42 +488,10 @@ class AgentService:
             self._config.fast_model,
             self._config.planner_model,
         ):
-            if fallback and self._model_available(fallback):
+            if fallback and fallback in names:
                 self._logger.info("falling back from model=%s to model=%s", requested, fallback)
                 return fallback
         return requested
-
-    def _server_ready(self) -> bool:
-        try:
-            response = self._session.get(f"{self._config.ollama_url}/api/tags", timeout=1.5)
-            return response.ok
-        except requests.RequestException:
-            return False
-
-    def _model_available(self, model: str) -> bool:
-        names = self._available_models()
-        return model in names
-
-    def _available_models(self) -> set[str]:
-        now = time.monotonic()
-        cached_at, cached_names = self._tags_cache
-        if now - cached_at < 10.0:
-            return cached_names
-        try:
-            response = self._session.get(f"{self._config.ollama_url}/api/tags", timeout=2)
-            response.raise_for_status()
-            data = response.json()
-            names = set()
-            for item in data.get("models", []):
-                name = item.get("name", "")
-                if not name:
-                    continue
-                names.add(name)
-                names.add(name.split(":", 1)[0])
-            self._tags_cache = (now, names)
-            return names
-        except requests.RequestException:
-            return set()
 
     def _recover_async(self, model: str) -> None:
         now = time.monotonic()
@@ -521,10 +544,10 @@ class AgentService:
     def _warm_model(self, model: str) -> None:
         try:
             self._session.post(
-                f"{self._config.ollama_url}/api/generate",
+                f"{self._config.ollama_url}/api/chat",
                 json={
                     "model": model,
-                    "prompt": "Respond with one word: ready.",
+                    "messages": [{"role": "user", "content": "Respond with one word: ready."}],
                     "stream": False,
                     "keep_alive": "10m",
                 },

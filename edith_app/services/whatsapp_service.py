@@ -20,13 +20,23 @@ except ImportError:
 
 
 class WhatsAppService:
-    def __init__(self) -> None:
+    def __init__(self, timing: object | None = None) -> None:
+        t = timing
         if pyautogui is not None:
             pyautogui.FAILSAFE = True
-            pyautogui.PAUSE = 0.08
-        self._startup_delay = 3.5
-        self._search_delay = 1.1
-        self._confirm_delay = 0.8
+            pyautogui.PAUSE = getattr(t, "pyautogui_pause", 0.08) if t else 0.08
+        self._startup_delay = getattr(t, "whatsapp_startup_delay", 3.5) if t else 3.5
+        self._search_delay = getattr(t, "whatsapp_search_delay", 1.1) if t else 1.1
+        self._confirm_delay = getattr(t, "whatsapp_confirm_delay", 0.8) if t else 0.8
+        self._read_chat_delay = getattr(t, "whatsapp_read_chat_delay", 2.5) if t else 2.5
+        self._new_chat_delay = getattr(t, "whatsapp_new_chat_delay", 0.9) if t else 0.9
+        self._clipboard_step = getattr(t, "whatsapp_clipboard_step", 0.2) if t else 0.2
+        self._focus_delay = getattr(t, "whatsapp_focus_click_delay", 0.15) if t else 0.15
+        self._esc_delay = getattr(t, "whatsapp_esc_delay", 0.1) if t else 0.1
+        self._copy_step = getattr(t, "whatsapp_copy_step", 0.15) if t else 0.15
+        self._copy_step_short = getattr(t, "whatsapp_copy_step_short", 0.12) if t else 0.12
+        self._copy_settle = getattr(t, "whatsapp_copy_settle", 0.35) if t else 0.35
+        self._ui_tick = getattr(t, "whatsapp_ui_tick", 0.35) if t else 0.35
 
     @property
     def available(self) -> bool:
@@ -55,7 +65,7 @@ class WhatsAppService:
 
             pyperclip.copy(message)
             pyautogui.hotkey("ctrl", "v")
-            time.sleep(0.2)
+            time.sleep(self._clipboard_step)
             pyautogui.press("enter")
             return f"Sent your WhatsApp message to {contact_name}."
         except Exception as exc:
@@ -96,7 +106,7 @@ class WhatsAppService:
             return "WhatsApp reading needs pyautogui and pyperclip installed."
 
         self.open_app()
-        time.sleep(2.5)
+        time.sleep(self._read_chat_delay)
 
         try:
             baseline = pyperclip.paste()
@@ -175,7 +185,7 @@ class WhatsAppService:
         try:
             pyperclip.copy(exact_name)
             pyautogui.hotkey("ctrl", "n")
-            time.sleep(0.9)
+            time.sleep(self._new_chat_delay)
             pyautogui.hotkey("ctrl", "a")
             pyautogui.press("backspace")
             pyautogui.hotkey("ctrl", "v")
@@ -195,16 +205,16 @@ class WhatsAppService:
         # Focus chat pane to improve copy reliability.
         screen_w, screen_h = pyautogui.size()
         pyautogui.click(int(screen_w * 0.72), int(screen_h * 0.46))
-        time.sleep(0.15)
+        time.sleep(self._focus_delay)
         pyautogui.press("esc")
-        time.sleep(0.1)
+        time.sleep(self._esc_delay)
 
         attempts: list[tuple[str, callable]] = [
             (
                 "ctrl_a_copy",
                 lambda: (
                     pyautogui.hotkey("ctrl", "a"),
-                    time.sleep(0.15),
+                    time.sleep(self._copy_step),
                     pyautogui.hotkey("ctrl", "c"),
                 ),
             ),
@@ -212,9 +222,9 @@ class WhatsAppService:
                 "page_up_then_copy",
                 lambda: (
                     pyautogui.press("pageup"),
-                    time.sleep(0.15),
+                    time.sleep(self._copy_step),
                     pyautogui.hotkey("ctrl", "a"),
-                    time.sleep(0.12),
+                    time.sleep(self._copy_step_short),
                     pyautogui.hotkey("ctrl", "c"),
                 ),
             ),
@@ -225,7 +235,7 @@ class WhatsAppService:
                 run_attempt()
             except Exception:
                 continue
-            time.sleep(0.35)
+            time.sleep(self._copy_settle)
             copied = pyperclip.paste().strip()
             if not copied:
                 continue

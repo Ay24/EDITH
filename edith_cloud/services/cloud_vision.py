@@ -49,6 +49,7 @@ class CloudVisionService:
         self._model = getattr(config, "cloud_vision_model", "llama-3.2-90b-vision-preview")
         self._client = None
         self._caption_cache: dict[str, tuple[float, str]] = {}
+        self._caption_cache_max = 128
 
         # Local fallback
         self._local_vision = None
@@ -114,6 +115,8 @@ class CloudVisionService:
             text = response.choices[0].message.content or ""
             text = text.strip()
             if text:
+                if len(self._caption_cache) >= self._caption_cache_max:
+                    self._caption_cache.pop(next(iter(self._caption_cache)), None)
                 self._caption_cache[cache_key] = (mtime, text)
             return text
         except Exception as exc:

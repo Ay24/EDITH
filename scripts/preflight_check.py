@@ -44,21 +44,24 @@ def check_inference():
     t0 = time.time()
     try:
         r = requests.post(
-            f"{URL}/api/generate",
+            f"{URL}/api/chat",
             json={
                 "model": PRIMARY_MODEL,
-                "prompt": "Say only the word: READY",
+                "messages": [
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": "Say only the word: READY"},
+                ],
                 "stream": False,
                 "options": {"num_predict": 20, "temperature": 0.5},
             },
             timeout=60,
         )
         elapsed = time.time() - t0
-        resp = r.json().get("response", "").strip()
+        resp = r.json().get("message", {}).get("content", "").strip()
         print(f"  Response : {repr(resp)}")
         print(f"  Latency  : {elapsed:.1f}s")
         if resp:
-            print(f"[PASS] '{PRIMARY_MODEL}' is responding correctly")
+            print(f"[PASS] '{PRIMARY_MODEL}' is responding correctly (via /api/chat)")
             return True
         else:
             print(f"[WARN] '{PRIMARY_MODEL}' returned empty response")

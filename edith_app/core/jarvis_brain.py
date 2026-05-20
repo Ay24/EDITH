@@ -21,7 +21,14 @@ class JarvisBrain:
         self.logger = logging.getLogger("edith.brain")
         self.classifier = CommandClassifier()
         self.context = ContextEngine(config, task_queue, session_memory)
-        self.proactive = ProactiveLoop(task_queue, self._handle_suggestion)
+        interval = int(getattr(config, "proactive_interval_seconds", 600))
+        initial = int(getattr(config, "proactive_initial_delay_seconds", 30))
+        self.proactive = ProactiveLoop(
+            task_queue,
+            self._handle_suggestion,
+            interval_seconds=interval,
+            initial_delay_seconds=initial,
+        )
         self.async_exec = AsyncWrapper()
         self._suggestion_callback: Callable[[str], None] | None = None
 

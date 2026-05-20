@@ -94,26 +94,31 @@ class VisionService:
 
         payload = {
             "model": model,
-            "prompt": prompt or (
-                "Describe this image briefly for desktop organization. "
-                "Focus on likely category words such as screenshot, receipt, document, poster, logo, family, trip, wallpaper, UI, notes, code, chart, selfie, or product. "
-                "Return one short line."
-            ),
-            "images": [encoded],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": prompt or (
+                        "Describe this image briefly for desktop organization. "
+                        "Focus on likely category words such as screenshot, receipt, document, poster, logo, family, trip, wallpaper, UI, notes, code, chart, selfie, or product. "
+                        "Return one short line."
+                    ),
+                    "images": [encoded],
+                },
+            ],
             "stream": False,
-            "keep_alive": "5m",     # let Ollama manage unloading after use
+            "keep_alive": "5m",
             "options": {
-                "num_ctx": 1024,    # reduced context → 192 MB KV instead of 384 MB
+                "num_ctx": 1024,
             },
         }
         try:
             response = self._session.post(
-                f"{self._config.ollama_url}/api/generate",
+                f"{self._config.ollama_url}/api/chat",
                 json=payload,
                 timeout=90,
             )
             response.raise_for_status()
-            text = response.json().get("response", "").strip()
+            text = response.json().get("message", {}).get("content", "").strip()
         except requests.RequestException:
             return ""
 
@@ -157,13 +162,18 @@ class VisionService:
 
         payload = {
             "model": model,
-            "prompt": (
-                "This is a screenshot of a WhatsApp chat. "
-                "Transcribe the visible conversation text as accurately as possible. "
-                "Keep each message on a new line. "
-                "Do not summarize. Do not explain. Return only transcribed chat text."
-            ),
-            "images": [encoded],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": (
+                        "This is a screenshot of a WhatsApp chat. "
+                        "Transcribe the visible conversation text as accurately as possible. "
+                        "Keep each message on a new line. "
+                        "Do not summarize. Do not explain. Return only transcribed chat text."
+                    ),
+                    "images": [encoded],
+                },
+            ],
             "stream": False,
             "options": {
                 "num_ctx": 1024,
@@ -171,12 +181,12 @@ class VisionService:
         }
         try:
             response = self._session.post(
-                f"{self._config.ollama_url}/api/generate",
+                f"{self._config.ollama_url}/api/chat",
                 json=payload,
                 timeout=120,
             )
             response.raise_for_status()
-            return response.json().get("response", "").strip()
+            return response.json().get("message", {}).get("content", "").strip()
         except requests.RequestException:
             return ""
 
@@ -190,20 +200,21 @@ class VisionService:
         if not main_model:
             return
         try:
-            # A minimal generate call with keep_alive=0 causes Ollama to
+            # A minimal chat call with keep_alive=0 causes Ollama to
             # schedule an immediate unload of that model.
             self._session.post(
-                f"{self._config.ollama_url}/api/generate",
+                f"{self._config.ollama_url}/api/chat",
                 json={
                     "model": main_model,
-                    "prompt": "",
+                    "messages": [{"role": "user", "content": ""}],
                     "keep_alive": 0,
                     "stream": False,
                 },
                 timeout=5,
             )
             # Give the runner a moment to actually unload
-            time.sleep(1.5)
+            delay = getattr(getattr(self._config, "automation_timing", None), "vision_settle_delay", 1.5)
+            time.sleep(delay)
         except Exception:
             pass
 

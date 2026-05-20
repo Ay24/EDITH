@@ -138,13 +138,24 @@ class RAGGenerator:
         return self._session
 
     def _blocking(self, prompt: str) -> str:
-        """Non-streaming single-shot generation."""
+        """Non-streaming single-shot generation via /api/chat."""
         try:
             session = self._get_session()
             payload = {
                 "model": self._model,
-                "prompt": prompt,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are EDITH's knowledge retrieval engine. "
+                            "Answer strictly from the provided context. "
+                            "Be concise and factual."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
                 "stream": False,
+                "keep_alive": "10m",
                 "options": {
                     "num_predict": self._max_tokens,
                     "temperature": self._temperature,
@@ -152,25 +163,36 @@ class RAGGenerator:
                 },
             }
             resp = session.post(
-                f"{self._url}/api/generate",
+                f"{self._url}/api/chat",
                 json=payload,
                 timeout=self._timeout,
             )
             resp.raise_for_status()
-            return resp.json().get("response", "").strip()
+            return resp.json().get("message", {}).get("content", "").strip()
         except Exception as exc:
             logger.warning("RAG generation (blocking) failed: %s", exc)
             return "I encountered an issue generating an answer. Please try again."
 
     def _stream(self, prompt: str, on_token: Callable[[str], None]) -> str:
-        """Streaming generation with per-token callback."""
+        """Streaming generation with per-token callback via /api/chat."""
         chunks: list[str] = []
         try:
             session = self._get_session()
             payload = {
                 "model": self._model,
-                "prompt": prompt,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are EDITH's knowledge retrieval engine. "
+                            "Answer strictly from the provided context. "
+                            "Be concise and factual."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
                 "stream": True,
+                "keep_alive": "10m",
                 "options": {
                     "num_predict": self._max_tokens,
                     "temperature": self._temperature,
@@ -178,7 +200,7 @@ class RAGGenerator:
                 },
             }
             with session.post(
-                f"{self._url}/api/generate",
+                f"{self._url}/api/chat",
                 json=payload,
                 timeout=(4, self._timeout),
                 stream=True,
@@ -191,7 +213,8 @@ class RAGGenerator:
                         data = json.loads(line)
                     except json.JSONDecodeError:
                         continue
-                    token = data.get("response", "")
+                    # /api/chat streams tokens in message.content
+                    token = data.get("message", {}).get("content", "")
                     if token:
                         chunks.append(token)
                         try:

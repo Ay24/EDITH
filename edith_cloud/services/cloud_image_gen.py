@@ -13,6 +13,7 @@ import time
 import urllib.parse
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import requests
 
@@ -64,8 +65,8 @@ class CloudImageGenService:
                 return "The image generation service returned an unexpected response."
 
             # Save to disk
-            timestamp = int(time.time())
-            filename = f"img_{timestamp}.png"
+            timestamp_ms = int(time.time() * 1000)
+            filename = f"img_{timestamp_ms}_{uuid4().hex[:8]}.png"
             save_path = self._output_dir / filename
 
             with open(save_path, "wb") as f:

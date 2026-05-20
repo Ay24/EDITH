@@ -11,31 +11,26 @@ class AssistantPersona:
     title: str = "Autonomous Desktop Copilot"
     wake_phrase: str = "edith"
     system_prompt: str = (
-        "You are EDITH, a state-of-the-art cognitive assistant designed for peak efficiency and fluid interaction.\n\n"
-        "## ⚡ CORE BEHAVIORAL DIRECTIVES\n"
-        "1. **Absolute Brevity & Precision**: Answer immediately without filler, meta-commentary, or preamble.\n"
-        "2. **Zero Robotic Transitions**: NEVER use phrases like 'As an AI...', 'Here is the...', 'To answer your question...', or 'Based on the context'.\n"
-        "3. **Fluid Conversational Tone**: Speak naturally, confidently, and directly, mirroring top-tier human executive assistants.\n"
-        "4. **Real-Time Streaming Protocol**: You are speaking aloud while generating. Sentences must be short, complete, and independently meaningful to avoid stuttering.\n\n"
-        "## 🧠 CONTEXTUAL INTELLIGENCE\n"
-        "* **Implicit Resolution**: Effortlessly resolve pronouns ('that', 'it', 'previous') using the provided conversation history and current task state.\n"
-        "* **Action-Oriented Confirmation**: If acknowledging a system action, confirm execution in one brief sentence (e.g., 'Volume set to 50%.').\n"
-        "* **Progressive Disclosure**: For complex queries, provide the core answer first. Expand only if the query inherently demands depth.\n\n"
-        "## 🎭 PERSONA & TONE\n"
-        "* **Vibe**: Calm, hyper-competent, precise, and subtly witty when appropriate.\n"
-        "* **Confidence**: Assertive. Never hesitate. If data is unavailable, state 'I lack live data for that' instead of apologizing or hallucinating.\n\n"
-        "## ⚙️ SYNTAX & GENERATION RULES\n"
-        "* Max 1-3 sentences unless explicitly asked for a detailed breakdown or plan.\n"
-        "* Start the response instantly with the answer. Do not delay.\n\n"
-        "## 🧠 CURRENT ACTIVE STATE\n"
-        "User Information:\n"
-        "{memory_context}\n\n"
-        "System State:\n"
-        "* Last topic: {last_topic}\n"
-        "* Last action: {last_action}\n"
-        "* Current task: {current_task}\n"
-        "* Recent actions: {recent_actions}\n\n"
-        "Respond strictly to the user's latest input, maintaining peak operational efficiency."
+        "You are EDITH — the user's local cognitive layer: J.A.R.V.I.S.-level competence, "
+        "Friday's warmth and dry wit, and EDITH's precision and loyalty. You are not a chatbot; "
+        "you are their chief of staff inside the machine.\n\n"
+        "## Voice & presence\n"
+        "- Speak as if beside them: calm, intelligent, slightly playful when it fits. "
+        "Dry humor is allowed; cringe, sycophancy, and corporate-speak are forbidden.\n"
+        "- If they sound stressed or low, acknowledge it in one short beat, then offer a concrete next step "
+        "(action, rest, or talk) — never lecture.\n\n"
+        "## Execution\n"
+        "- Infer intent: what they want done > literal words. Resolve 'it', 'that', 'same as before' from context.\n"
+        "- Be brief by default (1–3 tight sentences). Go long only when they ask for depth, code, or a plan.\n"
+        "- No meta filler ('As an AI', 'Here is', 'I'd be happy to'). Start with the answer or the move.\n"
+        "- When speaking aloud (streaming): short complete clauses; no mid-thought fragments.\n\n"
+        "## Honesty\n"
+        "- If you lack data or a tool cannot run, say so plainly — then suggest the closest real alternative.\n\n"
+        "## State you may rely on\n"
+        "User: {memory_context}\n"
+        "Last topic: {last_topic} | Last action: {last_action} | Current task: {current_task}\n"
+        "Recent actions: {recent_actions}\n\n"
+        "Respond to their latest message only, at peak clarity."
     )
 
 
@@ -53,7 +48,7 @@ class AppConfig:
     ollama_executable: str = field(default_factory=lambda: os.getenv("OLLAMA_EXECUTABLE", "ollama"))
     ollama_models_path: str = field(default_factory=lambda: os.getenv("OLLAMA_MODELS", ""))
     wake_word: str = field(default_factory=lambda: os.getenv("EDITH_WAKE_WORD", "edith"))
-    voice_command_timeout: int = field(default_factory=lambda: int(os.getenv("EDITH_VOICE_TIMEOUT", "6")))
+    voice_command_timeout: int = field(default_factory=lambda: int(os.getenv("EDITH_VOICE_TIMEOUT", "4")))
     command_timeout_seconds: int = field(default_factory=lambda: int(os.getenv("EDITH_COMMAND_TIMEOUT", "55")))
     voice_confidence_threshold: float = field(default_factory=lambda: float(os.getenv("EDITH_VOICE_CONFIDENCE_THRESHOLD", "0.45")))
     history_max_messages: int = field(default_factory=lambda: int(os.getenv("EDITH_HISTORY_MAX_MESSAGES", "24")))
@@ -67,8 +62,54 @@ class AppConfig:
     auto_warm_models: bool = field(default_factory=lambda: os.getenv("EDITH_AUTO_WARM_MODELS", "0") == "1")
     warm_model_count: int = field(default_factory=lambda: int(os.getenv("EDITH_WARM_MODEL_COUNT", "1")))
     prefer_offline_voice: bool = field(default_factory=lambda: os.getenv("EDITH_PREFER_OFFLINE_VOICE", "1") != "0")
-    preload_vosk_model: bool = field(default_factory=lambda: os.getenv("EDITH_PRELOAD_VOSK_MODEL", "0") == "1")
+    preload_vosk_model: bool = field(default_factory=lambda: os.getenv("EDITH_PRELOAD_VOSK_MODEL", "1") == "1")
     open_task_dashboard_on_start: bool = field(default_factory=lambda: os.getenv("EDITH_OPEN_TASK_DASHBOARD_ON_START", "0") == "1")
+    # Ultra-latency profile: sub-300ms perceived voice path (local-only, no cloud STT)
+    ultra_latency: bool = field(default_factory=lambda: os.getenv("EDITH_ULTRA_LATENCY", "1") != "0")
+    voice_pause_threshold: float = field(
+        default_factory=lambda: float(os.getenv("EDITH_VOICE_PAUSE_THRESHOLD", "0.42"))
+    )
+    voice_non_speaking_duration: float = field(
+        default_factory=lambda: float(os.getenv("EDITH_VOICE_NON_SPEAKING_DURATION", "0.22"))
+    )
+    voice_phrase_time_limit: int = field(
+        default_factory=lambda: int(os.getenv("EDITH_VOICE_PHRASE_LIMIT", "6"))
+    )
+    skip_llm_stt_normalize: bool = field(
+        default_factory=lambda: os.getenv("EDITH_SKIP_LLM_STT_NORMALIZE", "1") != "0"
+    )
+    neural_max_steps: int = field(default_factory=lambda: int(os.getenv("EDITH_NEURAL_MAX_STEPS", "4")))
+    neural_max_steps_voice: int = field(default_factory=lambda: int(os.getenv("EDITH_NEURAL_MAX_STEPS_VOICE", "2")))
+    skip_rag_on_voice: bool = field(default_factory=lambda: os.getenv("EDITH_SKIP_RAG_ON_VOICE", "1") != "0")
+    tts_chunk_min_chars: int = field(default_factory=lambda: int(os.getenv("EDITH_TTS_CHUNK_MIN_CHARS", "14")))
+    ui_voice_poll_ms: int = field(default_factory=lambda: int(os.getenv("EDITH_UI_VOICE_POLL_MS", "16")))
+    # Wake word + streaming voice OS layer
+    wake_engine_enabled: bool = field(default_factory=lambda: os.getenv("EDITH_WAKE_ENGINE", "1") != "0")
+    wake_backend: str = field(default_factory=lambda: os.getenv("EDITH_WAKE_BACKEND", "auto"))
+    wake_keywords: str = field(
+        default_factory=lambda: os.getenv("EDITH_WAKE_KEYWORDS", "edith,jarvis,friday")
+    )
+    openwakeword_models: str = field(
+        default_factory=lambda: os.getenv("EDITH_OPENWAKEWORD_MODELS", "hey_jarvis")
+    )
+    wake_score_threshold: float = field(
+        default_factory=lambda: float(os.getenv("EDITH_WAKE_SCORE_THRESHOLD", "0.55"))
+    )
+    always_listen_wake: bool = field(
+        default_factory=lambda: os.getenv("EDITH_ALWAYS_LISTEN_WAKE", "1") != "0"
+    )
+    streaming_intent_enabled: bool = field(
+        default_factory=lambda: os.getenv("EDITH_STREAMING_INTENT", "1") != "0"
+    )
+    streaming_intent_min_words: int = field(
+        default_factory=lambda: int(os.getenv("EDITH_STREAMING_INTENT_MIN_WORDS", "3"))
+    )
+    proactive_interval_seconds: int = field(
+        default_factory=lambda: int(os.getenv("EDITH_PROACTIVE_INTERVAL_SEC", "600"))
+    )
+    proactive_initial_delay_seconds: int = field(
+        default_factory=lambda: int(os.getenv("EDITH_PROACTIVE_INITIAL_DELAY", "30"))
+    )
     ui_animation_interval_ms: int = field(default_factory=lambda: int(os.getenv("EDITH_UI_ANIMATION_INTERVAL_MS", "60")))
     ui_stream_flush_ms: int = field(default_factory=lambda: int(os.getenv("EDITH_UI_STREAM_FLUSH_MS", "35")))
     ui_max_chat_lines: int = field(default_factory=lambda: int(os.getenv("EDITH_UI_MAX_CHAT_LINES", "800")))
@@ -160,7 +201,10 @@ class AppConfig:
     )
     rag_embed_model: str = field(
         default_factory=lambda: os.getenv(
-            "EDITH_RAG_EMBED_MODEL", "nomic-embed-text"
+            # BAAI/bge-base-en-v1.5 produces 768-dim vectors (matching existing ChromaDB)
+            # and runs fully on CPU via sentence-transformers — no VRAM contention.
+            # nomic-embed-text was an Ollama-only model ID that crashed the GTX 1650.
+            "EDITH_RAG_EMBED_MODEL", "BAAI/bge-base-en-v1.5"
         )
     )
     rag_rerank_model: str = field(
@@ -186,9 +230,20 @@ class AppConfig:
             "secondary_contact": "Secondary Contact",
         }
     )
+    # Populated in __post_init__ (must exist on @dataclass(slots=True))
+    automation_timing: object = field(init=False, repr=False, default=None)
 
     def __post_init__(self) -> None:
+        from edith_app.core.automation_timing import AutomationTiming
+
+        self.automation_timing = AutomationTiming.from_env()
         self._apply_runtime_overrides()
+
+    def wake_keyword_list(self) -> tuple[str, ...]:
+        return tuple(k.strip().lower() for k in self.wake_keywords.split(",") if k.strip())
+
+    def openwakeword_model_list(self) -> tuple[str, ...]:
+        return tuple(m.strip() for m in self.openwakeword_models.split(",") if m.strip())
 
     def _apply_runtime_overrides(self) -> None:
         path = Path(self.self_improve_overrides_path)

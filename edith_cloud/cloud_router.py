@@ -28,6 +28,9 @@ _CLOUD_REACT_SYSTEM = _REACT_SYSTEM.rstrip() + """
 Additional cloud rules:
 - Use "generate_image" when the user asks you to create, generate, or make an image.
 - Use "web_search" for fast structured web search results.
+- For greetings, small talk, acknowledgements, or incomplete fragments, respond with {"action":"reply"}.
+- Do not use tools for conversational prompts like "hello", "how are you", "okay", "thanks".
+- "what can you do" should return assistant capabilities directly via {"action":"reply"}, not web_search.
 - All other rules from above still apply.
 """
 
@@ -59,15 +62,28 @@ class CloudNeuralRouter(NeuralRouter):
         user_prompt: str,
         vision_context: str = "",
         on_token: Callable[[str], None] | None = None,
+        history: list[dict[str, str]] | None = None,
     ) -> str:
         """
         Runs the extended ReAct loop with cloud actions.
         """
         transcript: list[str] = []
+        if history:
+            for msg in history:
+                role = "User" if msg.get("role") == "user" else "EDITH"
+                transcript.append(f"{role}: {msg.get('content', '')}")
+
         if vision_context:
             transcript.append(f"[Vision] {vision_context.strip()}")
 
         transcript.append(f"User: {user_prompt}")
+        lowered_prompt = user_prompt.lower().strip()
+
+        direct_reply = self._direct_conversational_reply(lowered_prompt)
+        if direct_reply is not None:
+            if on_token:
+                on_token(direct_reply)
+            return direct_reply
 
         max_steps = 6  # one extra step for image gen
         for step in range(max_steps):
@@ -104,6 +120,9 @@ class CloudNeuralRouter(NeuralRouter):
 
             elif action == "generate_image":
                 prompt = action_data.get("input", "")
+                if self._looks_ambiguous(prompt):
+                    transcript.append("Result: Prompt too vague for image generation.")
+                    continue
                 if self._image_gen:
                     result = self._image_gen.generate(prompt)
                 else:
@@ -113,6 +132,9 @@ class CloudNeuralRouter(NeuralRouter):
 
             elif action == "web_search":
                 query = action_data.get("input", "")
+                if self._looks_ambiguous(query):
+                    transcript.append("Results: Query too vague for web search.")
+                    continue
                 if self._search:
                     result = self._search.summarize_query(query)
                 else:
@@ -184,3 +206,31 @@ class CloudNeuralRouter(NeuralRouter):
         if on_token:
             on_token(reply)
         return reply
+
+    def _looks_ambiguous(self, text: str) -> bool:
+        t = (text or "").strip().lower()
+        if not t:
+            return True
+        if len(t) < 8:
+            return True
+        vague = {
+            "for me", "okay", "ok", "hello", "hi", "hey", "how are you",
+            "or can you", "can you", "do it", "that", "this",
+        }
+        return t in vague
+
+    def _direct_conversational_reply(self, lowered_prompt: str) -> str | None:
+        if lowered_prompt in {"hello", "hi", "hey"}:
+            return "Hello. Ready when you are."
+        if lowered_prompt in {"how are you", "how are you?"}:
+            return "I am doing great and ready to help."
+        if lowered_prompt in {"ok", "okay", "thanks", "thank you"}:
+            return "Understood. Tell me the exact task and I will execute it."
+        if lowered_prompt in {"for me", "or can you", "can you"}:
+            return "Yes. Tell me exactly what you want me to do."
+        if lowered_prompt in {"what can you do", "what can you do?"}:
+            return (
+                "I can chat, plan, search the web, generate images, read memory, "
+                "send WhatsApp actions, and run safe system commands."
+            )
+        return None
